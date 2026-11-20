@@ -721,24 +721,80 @@ evidence-separated audit, physical page-directory/page-table requirements,
 register ownership map, safe i915-bound validation, a minimal reversible
 page-walk experiment, recovery procedures, and unresolved questions.
 
-The audit confirms the two-level 4 KiB geometry but found four physical
+The audit confirmed the two-level 4 KiB geometry but found four CPU-model
 blockers:
 
 - PDE bits 11:4 carry physical address 39:32. PTE bits 10:4 carry physical
-  address 38:32; PTE bit 11 is cacheability control bit 3. The current shared
-  `0xff0` encoder is valid for PDEs but not PTEs.
+  address 38:32; PTE bit 11 is cacheability control bit 3. The pre-correction
+  shared `0xff0` encoder was valid for PDEs but not PTEs.
 - Mapped pages are limited to 39-bit addresses; page tables may be addressed
-  below 2^40. The model and adapter currently accept 40-bit mapped pages.
+  below 2^40. The pre-correction model and adapter accepted 40-bit mapped pages.
 - The page directory must reside entirely in the GGTT and PDEs must be modified
-  through GTTADDR. The model keeps `directory[512]` in CPU memory.
+  through GTTADDR. The pre-correction model kept `directory[512]` in CPU memory.
 - Live PDE removal is not hardware-safe because directory entries are cached
   and cannot be invalidated on the fly. i915 keeps the PDE valid and clears
-  PTEs to a scratch entry; the model retires and frees the table.
+  PTEs to a scratch entry; the pre-correction model retired and freed the table.
 
 Register-level activation and invalidation (`PP_DCLV`, `PP_DIR_BASE`,
 per-engine PPGTT enable, `INSTPM` TLB invalidate plus sync flush, and
 `GFX_FLSH_CNTL_GEN6`) remain absent and i915-owned. No hardware state was
 changed, i915 was not unbound, no PPGTT register was programmed, and no
-physical GPU page walk is claimed. Stage 3 remains not implemented; the next
-gate is review and correction of the software model and contracts, not a
-hardware run.
+physical GPU page walk is claimed. Stage 3 remains not implemented. These
+software findings were corrected in the next section; the next physical gate is
+exclusive ownership and real GGTT/MMIO work, not a hardware run.
+
+### Corrected Haswell Gen7.5 PPGTT model
+
+Implemented the CPU-side corrections from the readiness audit. PDE and PTE
+encoding are now separate. PDEs carry page-table address bits 39:32 at 11:4 and
+accept page tables below 2^40. PTEs carry page address bits 38:32 at 10:4 and
+map cacheability bit 3 to entry bit 11; mapped pages are limited to 2^39.
+Reserved PDE bits, the 32 KiB page-size bit, misalignment, and overflow are
+rejected.
+
+Added `struct idw_hsw_ppgtt_directory_ops` with `alloc_directory`,
+`free_directory`, `write_pde_gttaddr`, `read_pde_gttaddr`, and `flush_gtt`.
+The model keeps a separate CPU shadow and writes/reads PDEs through GTTADDR.
+`idw_hsw_ppgtt_pde()` is the shadow accessor;
+`idw_hsw_ppgtt_hardware_pde()` reads hardware-visible storage.
+
+Unmap no longer removes a PDE. Empty tables remain reachable until
+`idw_hsw_ppgtt_reclaim_empty()` runs with the model inactive and no invalidation
+pending. Reclaim points the PDE at a zeroed scratch table and retires the old
+table; the old table is freed only after the resulting invalidation completes.
+PDE publication and reclamation are rejected while active. Invalidation failure
+still poisons the VM.
+
+Added hand-derived golden vectors for PDE/PTE upper address bits, PTE
+cacheability bit 11, 39-bit and 40-bit boundaries, misalignment, overflow,
+reserved/32 KiB flags, GGTT directory residency, GTTADDR writes, active-PDE
+rejection, deferred reclamation, and directory-write rollback. Expected values
+are literals derived from the PRM bit layouts, not encoder output.
+
+Validation in this continuation:
+
+- `make contract-test backend-contract-test ppgtt-model-test
+  pt-dma-adapter-test memory-manager-test abi-test` passed.
+- ASan/UBSan with leak detection passed for the PPGTT and adapter tests.
+- `make kernel CC=gcc W=1` passed.
+- The QEMU EDU page-table storage test was reassessed with the corrected PTE
+  encoder and independent expected values. It passed under QEMU 10.0.13 TCG
+  with Debian `6.12.117+deb13-amd64`:
+
+```text
+IDW_QEMU_DMA: page-table DMA layout verified bytes=4096 first=000002b1 last=003ff2b1
+IDW_QEMU_DMA: page-table malformed descriptors and unsupported mapping rejected
+IDW_QEMU_DMA: page-table adapter cleanup verified
+IDW_QEMU_DMA: PASS: probe, page-table DMA, 32 DMA cycles, cleanup and remove completed
+QEMU exit status: 33
+```
+
+Evidence is preserved at
+`tests/qemu-dma/evidence-2026-11-20-tcg-page-table-corrected.log` (SHA-256
+`393140205e06fbb6b9e3eaad161eb6181fed9ca9c3274e11108df0693836f22a`).
+
+No hardware state was changed. i915 remains bound and is the physical GPU
+owner. Stage 3 remains not implemented: there is no real GGTT allocator, MMIO
+GTTADDR path, register-level invalidation, VM activation, or physical page-walk
+evidence. The audit's four software findings above are corrected; its
+register-level and physical findings remain open.

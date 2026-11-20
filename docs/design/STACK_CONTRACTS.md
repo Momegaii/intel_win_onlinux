@@ -87,12 +87,13 @@ continues alongside these hardware milestones. The detailed implementation
 plan and Gen7.5 PPGTT evidence gates are in
 `HASWELL_GEN75_PPGTT_PLAN.md`. The 2026-11-20 physical-readiness audit,
 register ownership map, and reversible page-walk experiment are in
-`HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md`; that audit is documentation and
-planning only, not hardware validation. Independence is the design target from
-stage 1; i915 is only a temporary validation owner. Operational ownership
-restrictions may be relaxed only on an isolated test system with exclusive
-device ownership. Do not trade away source validation, lifetime rules, cleanup,
-rollback, or reproducible tests.
+`HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md`; its CPU-side encoding,
+GGTT-directory, and reclamation findings are now implemented in the software
+model, but the physical plan is still not hardware validation. Independence is
+the design target from stage 1; i915 is only a temporary validation owner.
+Operational ownership restrictions may be relaxed only on an isolated test
+system with exclusive device ownership. Do not trade away source validation,
+lifetime rules, cleanup, rollback, or reproducible tests.
 
 ## Public/internal interfaces added in this milestone
 
@@ -110,13 +111,16 @@ unimplemented. Headers are compile-checked by `make contract-test`.
 
 The separate CPU-only GPU-VA interval allocator and Haswell Gen7.5 PPGTT model
 are implemented in `src/gpuva_model.c` and `src/haswell_ppgtt_model.c`, with
-tests in `make ppgtt-model-test`. A storage-only adapter
+tests in `make ppgtt-model-test`. The model now has separate PDE/PTE encoders,
+distinct 40-bit page-table and 39-bit mapped-page limits, a GGTT-resident
+directory provider with GTTADDR PDE writes, and scratch-table retention with
+deferred reclamation. A storage-only adapter
 (`include/idw/pt_dma_adapter.h`, `src/pt_dma_adapter.c`) can supply pages from
 an injectable DMA provider and is bound to the kernel DMA provider by
 `kernel/idw_dma_pt_adapter.c`. Userspace tests still assign synthetic DMA
-addresses; the QEMU EDU probe passed a page-table storage copy check through
-virtual DMA on 2026-11-20. None of these map resources for a device, publish
-hardware page tables, invalidate GPU translations, or activate a VM.
+addresses; the QEMU EDU probe passed a corrected page-table storage copy check
+through virtual DMA on 2026-11-20. None of these map resources for a device,
+publish hardware page tables, invalidate GPU translations, or activate a VM.
 
 `include/idw/memory_manager.hpp` and `src/memory_manager.cpp` add a CPU-side
 allocation lifecycle coordinator over a replaceable backend callback table.

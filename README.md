@@ -98,8 +98,8 @@ Haswell is Gen 7.5. Do not assume Gen8+ address-space or command-stream features
 | Stage | Milestone | Proof required | Status |
 |---|---|---|---|
 | 1 | GPU resource read/write | GPU writes data into a managed resource; CPU reads back the exact result. | Complete for the i915-assisted path: Haswell `8086:0412` wrote `0x2468ace0` at resource offset 16 and CPU read it back exactly. |
-| 2 | Native DMA | IDW allocates and maps real DMA memory for its exclusively owned PCI device. | In progress: QEMU EDU virtual-device DMA, page-table DMA copy, and provider cleanup passed on TCG. Physical Haswell DMA remains unproven; i915 remains bound. See `tests/qemu-dma/evidence-2026-11-20-tcg-page-table.log`. |
-| 3 | Hardware PPGTT | GPU uses IDW-created Haswell Gen7.5 page tables. | Not implemented. The 2026-11-20 PRM readiness audit is complete and the reversible experiment is designed, but GGTT-resident PDEs, separate 40-bit PDE/39-bit PTE limits, scratch-PDE retention, and register-level invalidation/activation are still missing. i915 owns hardware mappings. See `docs/design/HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md`. |
+| 2 | Native DMA | IDW allocates and maps real DMA memory for its exclusively owned PCI device. | In progress: QEMU EDU virtual-device DMA, page-table DMA copy, and provider cleanup passed on TCG. Physical Haswell DMA remains unproven; i915 remains bound. See `tests/qemu-dma/evidence-2026-11-20-tcg-page-table-corrected.log`. |
+| 3 | Hardware PPGTT | GPU uses IDW-created Haswell Gen7.5 page tables. | Not implemented. The CPU model now has separate 40-bit PDE/39-bit PTE encoders, GGTT-resident directory modeling with GTTADDR writes, active/quiesced publication rules, and scratch-PDE retention. A real GGTT allocator, MMIO path, register-level invalidation/activation, and physical page walk remain missing. i915 owns hardware mappings. See `docs/design/HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md`. |
 | 4 | Independent submission | IDW submits and completes commands without i915 graphics execution. | Not implemented; all demonstrated execution is i915-assisted. |
 | 5 | Scheduler | Multiple contexts, queues, timeout and recovery. | Not implemented independently; existing context/fence tests do not establish an IDW scheduler. |
 | 6 | UMD | Real shader compilation and rendering. | Not implemented. |
@@ -117,9 +117,10 @@ specified in [`docs/design/HASWELL_GEN75_PPGTT_PLAN.md`](docs/design/HASWELL_GEN
 The 2026-11-20 physical-readiness audit, register ownership map, and minimal
 reversible page-walk experiment are in
 [`docs/design/HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md`](docs/design/HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md).
-That audit found that the current shared PDE/PTE encoder, 40-bit mapped-page
-limit, CPU-resident page directory, and live PDE removal are not yet
-hardware-safe; no hardware state was changed and i915 remains bound.
+That audit's CPU-side findings are now corrected: separate PDE/PTE encoders,
+40-bit page-table and 39-bit mapped-page limits, a GGTT-resident directory
+provider with GTTADDR PDE writes, and scratch-table retention with deferred
+reclamation. No hardware state was changed and i915 remains bound.
 The CPU-only GPU-VA interval allocator and Haswell Gen7.5 PPGTT software model
 are implemented in `src/gpuva_model.c` and `src/haswell_ppgtt_model.c`; run
 `make ppgtt-model-test` for their unit tests. They use synthetic DMA addresses
@@ -148,7 +149,7 @@ device-side DMA transactions. The probe also copies a fully populated 4 KiB
 Gen7.5 page table to a second DMA page and verifies the exact layout after
 device DMA. That page-table path passed on 2026-11-20 under QEMU 10.0.13 TCG
 with a Debian 6.12.117 guest; the serial log is
-`tests/qemu-dma/evidence-2026-11-20-tcg-page-table.log`. It is not part of
+`tests/qemu-dma/evidence-2026-11-20-tcg-page-table-corrected.log`. It is not part of
 `make test` and does not validate Haswell DMA or change host i915 ownership. See
 [`tests/qemu-dma/README.md`](tests/qemu-dma/README.md) for run instructions and
 the evidence required for a pass.

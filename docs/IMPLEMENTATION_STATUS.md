@@ -52,8 +52,8 @@ PPGTT and independent GPU ownership are not implemented.
 | Stage | Milestone | Proof required | Status |
 |---|---|---|---|
 | 1 | GPU resource read/write | GPU writes data into a managed resource; CPU reads back the exact result. | **Passed, i915-assisted:** Haswell `8086:0412` wrote `0x2468ace0` at offset 16; CPU PREAD verified it after GEM_WAIT. i915 owns execution and mappings. |
-| 2 | Native DMA | IDW allocates and maps real DMA memory for its exclusively owned PCI device. | **In progress:** QEMU EDU virtual-device DMA, page-table DMA copy, and remove cleanup passed under TCG. Physical Haswell DMA remains unproven and i915 remains bound. See `tests/qemu-dma/evidence-2026-11-20-tcg.log` and `tests/qemu-dma/evidence-2026-11-20-tcg-page-table.log`. |
-| 3 | Hardware PPGTT | GPU uses IDW-created Haswell Gen7.5 page tables. | Not implemented. The 2026-11-20 PRM audit and reversible experiment plan are complete, but GGTT-resident PDEs, separate 40-bit PDE/39-bit PTE limits, scratch-PDE retention, and register-level invalidation/activation remain missing; i915 owns hardware mappings. See `docs/design/HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md`. |
+| 2 | Native DMA | IDW allocates and maps real DMA memory for its exclusively owned PCI device. | **In progress:** QEMU EDU virtual-device DMA, page-table DMA copy, and remove cleanup passed under TCG. Physical Haswell DMA remains unproven and i915 remains bound. See `tests/qemu-dma/evidence-2026-11-20-tcg.log` and `tests/qemu-dma/evidence-2026-11-20-tcg-page-table-corrected.log`. |
+| 3 | Hardware PPGTT | GPU uses IDW-created Haswell Gen7.5 page tables. | Not implemented. The CPU model now has GGTT-resident directory modeling, separate 40-bit PDE/39-bit PTE encoders, scratch-PDE retention, and active/quiesced publication rules. A real GGTT allocator, MMIO GTTADDR path, register-level invalidation/activation, and physical page walk remain missing; i915 owns hardware mappings. See `docs/design/HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md`. |
 | 4 | Independent submission | IDW submits and completes commands without i915 graphics execution. | Not implemented. |
 | 5 | Scheduler | Multiple contexts, queues, timeout and recovery. | Not implemented independently. |
 | 6 | UMD | Real shader compilation and rendering. | Not implemented. |
@@ -81,10 +81,10 @@ PPGTT and independent GPU ownership are not implemented.
 | Backend-neutral allocation/VM lifecycle core | software implementation; simulated-backend tests pass | `MemoryManager` composes backend backing ownership, GPU-VA reserve/release, bind/unbind, invalidation retry, submission reference counting, wait/quiescence recovery, and destroy guards. `make memory-manager-test` tests complete success and failure paths. The callback core does not itself implement residency/eviction or hardware mappings. |
 | i915-assisted integrated memory manager | implemented and hardware-tested; i915-owned | `I915AssistedMemoryBackend` connects managed backing, pin/bind, command submission, wait/quiesce, CPU dword access, context-destroy unbind, and GEM cleanup through public i915 ioctls. `make gpu-memory-manager-test` completed three resource lifecycles at `0x10000000`, `0x10001000`, and `0x10002000`. `make gpu-resource-write-test` passed on Haswell `8086:0412`: GPU VA `0x10000010`, initial value `0x13579bdf`, submitted value/readback `0x2468ace0`. Simulated tests cover malformed command encoding, bounds, failed exec/wait/readback, retained submission references, quiescence, and cleanup. i915 owns backing, mapping, PPGTT, translation, execution and scheduling; native DMA and IDW PPGTT remain unimplemented. |
 | GPU-VA interval allocator | CPU-only software model implemented | `src/gpuva_model.c` supports bounded first-fit allocation, alignment, guards, fixed reservations, overlap rejection, and release. It does not own allocations/backing, residency, map references, or hardware GPU addresses. |
-| Haswell Gen7.5 PPGTT CPU model | software table model implemented; physical/hardware validation not run; PRM corrections pending | `src/haswell_ppgtt_model.c` builds 512 PDE slots with 1024-entry/4 KiB PTE tables, uses the upstream Gen6/7 address transform and valid bits with Haswell uncached policy, supports checked map/unmap and software translation, rolls back on allocation/duplicate table-DMA failures, defers empty-table reclamation until matching invalidation acknowledgement, coalesces dirty ranges by generation, and poisons submission checks after invalidation failure. The 2026-11-20 audit found that the shared `0xff0` transform is correct for PDEs but not PTEs, and that 40-bit mapped pages exceed Haswell's 39-bit PTE limit; these corrections are pending. Synthetic DMA addresses and CPU translation are software tests only. |
+| Haswell Gen7.5 PPGTT CPU model | software table model corrected; physical/hardware validation not run | `src/haswell_ppgtt_model.c` builds 512 PDE slots with 1024-entry/4 KiB PTE tables, uses separate PDE (`0xff0`, `< 2^40`) and PTE (`0x7f0`, `< 2^39`) encoders with Haswell uncached policy, keeps a CPU shadow separate from a GGTT-resident directory provider, performs PDE writes/reads through GTTADDR callbacks, supports checked map/unmap and software translation, rejects PDE publication or reclamation while active, keeps empty-table PDEs valid, reclaims through a zeroed scratch table, defers old-table free until matching invalidation acknowledgement, coalesces dirty ranges by generation, and poisons submission checks after invalidation failure. Hand-derived golden vectors cover upper address bits, PTE cacheability bit 11, 39-bit/40-bit boundaries, misalignment, overflow, and reserved/32 KiB flags. Synthetic DMA addresses and CPU translation are software tests only. |
 | Page-table memory backend boundary | contracts implemented; provider passed virtual DMA validation | `page_table_memory.h` tags page/mapping addresses with device-generation scope and lifetime cookies. The separate internal `idw_dma_memory` provider uses `dma_alloc_coherent` only for an exclusively IDW-driver-bound PCI device, enforces 40-bit DMA range/alignment, and tracks page cookies. `kernel/idw_edu_dma_test_main.c` bound to QEMU EDU (`1234:11e8`), completed 32 verified 4 KiB DMA read/write round trips, rejected invalid descriptors and mask/owner cases, and freed an outstanding provider page during PCI remove. The run used QEMU 11.1.3 TCG, not KVM; it validates the virtual DMA path only, not physical Haswell DMA. |
-| DMA-backed page-table storage adapter | software implementation; virtual DMA evidence | `src/pt_dma_adapter.c` wraps an injectable DMA page provider, validates zeroed 4 KiB coherent/streaming pages, 40-bit alignment, device/generation scope, cookies, and outstanding-page cleanup, and exposes page-table-only memory/PPGTT ops. `IDW_PT_BACKEND_PAGE_TABLE_ONLY` is rejected by the complete native contract. `make pt-dma-adapter-test` covers validation, provider-failure rollback, synchronization, cleanup, and PPGTT table allocation/free with a simulated provider. The QEMU EDU probe copies a populated Gen7.5 page table through device DMA and verifies its layout; this passed on 2026-11-20 under QEMU 10.0.13 TCG with Debian kernel 6.12.117 (`tests/qemu-dma/evidence-2026-11-20-tcg-page-table.log`). This is storage and virtual-DMA evidence only: no resource mapping, invalidation, VM activation, MMIO, or hardware page walk. |
-| Haswell hardware PPGTT | not implemented; readiness audit complete | No hardware page-table publication, GPU TLB invalidation, context activation, MMIO, independent page walk, or physical GPU test. The 2026-11-20 PRM audit found four blockers before physical use: PDE/PTE encodings differ (PTE bit 11 is cacheability, not address), mapped pages are 39-bit while page tables may be 40-bit, the page directory must be GGTT-resident and written through GTTADDR, and live PDE removal is unsafe because directory entries are cached. The model still uses a CPU `directory[512]` and retires PDEs; i915 remains the hardware owner. See `docs/design/HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md`. |
+| DMA-backed page-table storage adapter | software implementation; virtual DMA evidence | `src/pt_dma_adapter.c` wraps an injectable DMA page provider, validates zeroed 4 KiB coherent/streaming pages, 40-bit alignment, device/generation scope, cookies, and outstanding-page cleanup, and exposes page-table-only memory/PPGTT ops. `IDW_PT_BACKEND_PAGE_TABLE_ONLY` is rejected by the complete native contract. `make pt-dma-adapter-test` covers validation, provider-failure rollback, synchronization, cleanup, and PPGTT table allocation/free with a simulated provider. The QEMU EDU probe copies a populated Gen7.5 page table through device DMA and verifies its layout; this passed on 2026-11-20 under QEMU 10.0.13 TCG with Debian kernel 6.12.117 (`tests/qemu-dma/evidence-2026-11-20-tcg-page-table-corrected.log`). This is storage and virtual-DMA evidence only: no resource mapping, invalidation, VM activation, MMIO, or hardware page walk. |
+| Haswell hardware PPGTT | not implemented; CPU model corrected, physical path absent | No hardware page-table publication, GPU TLB invalidation, context activation, MMIO, independent page walk, or physical GPU test. The 2026-11-20 PRM audit found four CPU-model blockers: PDE/PTE encodings differ, mapped pages are 39-bit while page tables may be 40-bit, the page directory must be GGTT-resident and written through GTTADDR, and live PDE removal is unsafe because directory entries are cached. Those software findings are corrected and tested. A real GGTT allocator, MMIO GTTADDR path, register-level invalidation/activation, cache-policy selection, coherency/IOMMU work, and physical evidence remain missing; i915 remains the hardware owner. See `docs/design/HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md`. |
 | X: IDW command/fence translation | not implemented | The i915-assisted manager tracks internal submission tickets through completion, but IDW does not yet translate DXGKRNL-style submissions or expose a hardware-independent fence timeline. |
 | P/Q: DRM/KMS integration | research / existing Linux dependency | Uses i915 DRM UAPI for safe observation and GEM smoke test. |
 | R/S/T: WDDM/UMD/WSL2 study | research | No Windows `.sys` loading or UMD execution. |
@@ -156,11 +156,43 @@ existing ownership-checked `idw_dma_memory` provider using `dma_alloc_coherent`
 and DMA synchronization. The QEMU EDU test copies a populated 4 KiB page
 table to a second DMA page and verifies the exact bytes and Gen7.5 PTE layout
 after device-side DMA. This passed on 2026-11-20 under QEMU 10.0.13 TCG with
-Debian kernel 6.12.117 (`tests/qemu-dma/evidence-2026-11-20-tcg-page-table.log`).
+Debian kernel 6.12.117
+(`tests/qemu-dma/evidence-2026-11-20-tcg-page-table-corrected.log`).
 The check is page-table storage visibility through QEMU's virtual PCI DMA
 model, not Haswell PPGTT. There is still no resource mapping,
 GPU TLB invalidation, VM activation, MMIO, hardware page walk, or independent
 GPU ownership.
+
+## 1.3.0 — Corrected Haswell Gen7.5 PPGTT model
+
+Corrected the CPU-side model using the physical-readiness audit. PDE and PTE
+encoding are now separate: PDEs carry page-table address bits 39:32 at 11:4,
+while PTEs carry page address bits 38:32 at 10:4 and cacheability bit 3 at bit
+11. Page tables are limited to `< 2^40`; mapped pages are limited to `< 2^39`.
+Reserved PDE bits and the 32 KiB page-size bit are rejected explicitly.
+
+Added a GGTT-resident directory provider contract with allocation, GTTADDR
+PDE write/read, flush, and release callbacks. The model keeps a separate CPU
+shadow; `idw_hsw_ppgtt_pde()` reads the shadow and
+`idw_hsw_ppgtt_hardware_pde()` reads through GTTADDR. Unmap no longer removes a
+PDE. Empty tables remain reachable until a quiesced
+`idw_hsw_ppgtt_reclaim_empty()` points the PDE at a zeroed scratch table; the
+old table is freed only after the next invalidation completes. PDE publication
+and reclamation are rejected while the model is active, and invalidation
+failure still poisons the VM.
+
+Added hand-derived golden-vector tests for PDE/PTE upper address bits, PTE
+cacheability bit 11, 39-bit and 40-bit boundaries, misalignment, overflow,
+reserved/32KB flags, GGTT directory residency, GTTADDR writes, active-PDE
+rejection, deferred reclamation, and rollback. The QEMU EDU page-table storage
+test now uses the corrected PTE encoder and independent expected values; it
+passed under QEMU 10.0.13 TCG with Debian kernel 6.12.117. Evidence is at
+`tests/qemu-dma/evidence-2026-11-20-tcg-page-table-corrected.log`.
+
+No hardware state was changed. i915 remains bound and is the physical GPU
+owner. Stage 3 remains not implemented: there is no real GGTT allocator, MMIO
+GTTADDR path, register-level invalidation, VM activation, or physical page-walk
+evidence.
 
 ## 1.2.0 — Physical Haswell PPGTT readiness audit
 
@@ -171,25 +203,28 @@ page-directory/page-table formats, alignment and address-width rules, cache
 coherency, invalidation, register ownership, safe i915-bound validation, and a
 minimal reversible page-walk experiment for a future exclusively owned device.
 
-The audit confirms the current two-level geometry but identifies four physical
-blockers:
+The audit confirmed the current two-level geometry but identified four
+CPU-model blockers:
 
 1. PDE and PTE encodings differ. PDE bits 11:4 carry physical address 39:32;
    PTE bits 10:4 carry physical address 38:32 and PTE bit 11 is cacheability
-   control bit 3. The current shared `0xff0` encoder is not valid for PTEs.
+   control bit 3. The pre-correction shared `0xff0` encoder was not valid for
+   PTEs.
 2. Mapped data pages are limited to 39-bit addresses; page tables may be
-   addressed below 2^40. The model and adapter currently accept 40-bit mapped
-   pages.
+   addressed below 2^40. The pre-correction model and adapter accepted 40-bit
+   mapped pages.
 3. The page directory must be entirely within the GGTT and PDEs must be
-   modified through GTTADDR. The model keeps `directory[512]` in CPU memory and
-   has no GGTT allocator.
+   modified through GTTADDR. The pre-correction model kept `directory[512]` in
+   CPU memory and had no GGTT provider.
 4. Live PDE removal is not hardware-safe because the directory cache cannot be
-   invalidated on the fly. The model clears and retires PDEs; i915 keeps the
-   PDE valid and clears PTEs to a scratch entry instead.
+   invalidated on the fly. The pre-correction model cleared and retired PDEs;
+   i915 keeps the PDE valid and clears PTEs to a scratch entry instead.
+
+These software findings were corrected in 1.3.0. The physical blockers remain.
 
 Register-level activation and invalidation remain absent and i915-owned:
 `PP_DCLV`, `PP_DIR_BASE`, per-engine PPGTT enable, `INSTPM` TLB invalidate plus
 sync flush, and `GFX_FLSH_CNTL_GEN6`. No hardware state was changed, i915 was
 not unbound, and no physical page walk is claimed. Stage 3 remains not
-implemented; the next gate is review and correction of the software model and
-contracts, not a physical run.
+implemented; the next physical gate is exclusive ownership, a real GGTT
+allocator, and MMIO register work, not a physical run.
