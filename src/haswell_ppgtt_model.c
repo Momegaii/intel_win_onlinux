@@ -330,12 +330,16 @@ int idw_hsw_ppgtt_model_create(
     return 0;
 }
 
-void idw_hsw_ppgtt_model_destroy(struct idw_hsw_ppgtt_model *model)
+int idw_hsw_ppgtt_model_destroy_checked(struct idw_hsw_ppgtt_model *model,
+                                        bool hardware_quiesced)
 {
     uint32_t i;
 
     if (!model)
-        return;
+        return -EINVAL;
+    if (!hardware_quiesced &&
+        (model->active || model->invalidation_pending))
+        return -EBUSY;
     for (i = 0; i < IDW_HSW_PPGTT_PDES; ++i)
         free_table(model, model->tables[i]);
     for (i = 0; i < model->retired_count; ++i)
@@ -345,6 +349,12 @@ void idw_hsw_ppgtt_model_destroy(struct idw_hsw_ppgtt_model *model)
         model->directory_ops.free_directory(model->directory_ops.context,
                                             &model->directory);
     free(model);
+    return 0;
+}
+
+void idw_hsw_ppgtt_model_destroy(struct idw_hsw_ppgtt_model *model)
+{
+    (void)idw_hsw_ppgtt_model_destroy_checked(model, false);
 }
 
 int idw_hsw_ppgtt_map(struct idw_hsw_ppgtt_model *model,

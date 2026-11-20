@@ -142,10 +142,13 @@ The provider implements `struct idw_hsw_ppgtt_directory_ops`:
 - `alloc_directory`: allocates one 4 KiB, page-directory-tagged, resident and
   pinned GGTT range, zeroes all 512 PDE slots through GTTADDR, and flushes. The
   pin prevents the allocator from releasing a hardware-visible directory while
-  the model owns it.
-- `free_directory`: zeroes the slots through GTTADDR, flushes, unpins, and frees
-  the GGTT range. Teardown continues to the free step even if zeroing/flushing
-  fails, and marks the provider poisoned.
+  the model owns it. Cookie collisions with another provider sharing the same
+  allocator are retried with the next cookie.
+- `free_directory`: refuses and poisons the provider while the hardware
+  abstraction reports active PPGTT, so a live directory is not zeroed or
+  released. After quiescence it zeroes the slots through GTTADDR, flushes,
+  unpins, and frees the GGTT range. Teardown continues to the free step even if
+  zeroing/flushing fails, and marks the provider poisoned.
 - `write_pde_gttaddr` / `read_pde_gttaddr`: validate the directory scope and
   use the hardware abstraction.
 - `flush_gtt`: flushes through the hardware abstraction.
@@ -227,6 +230,11 @@ Coverage:
   identity; refreshed ownership observations before start; successful staged
   start; reverse teardown; init-failure rollback; cleanup-failure poison;
   recovery; and destroy guards.
+- Checked PPGTT model teardown refuses active or invalidation-pending models
+  unless the caller asserts hardware quiescence after reset.
+- Directory release refuses while hardware is active; duplicate provider
+  cookies are retried; deactivation failure keeps active state conservative,
+  restores registers best-effort, poisons, and blocks destroy until reset.
 
 Executed results on 2026-11-20:
 
@@ -263,4 +271,6 @@ Before a real backend may program hardware:
    serial log, register dump, PDE/PTE readback, and CPU data readback.
 
 Until those gates are met, Stage 3 remains not implemented. The software model
-and simulated backend are preparation, not hardware proof.
+and simulated backend are preparation, not hardware proof. The Stage 3B
+prerequisite and dependency plan is in
+`docs/design/HASWELL_GEN75_STAGE3B_PLAN.md`.

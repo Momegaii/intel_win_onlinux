@@ -44,15 +44,21 @@ static int alloc_directory(void *context,
     if (!directory || directory->size != sizeof(*directory) ||
         directory->version != IDW_HSW_PPGTT_DIRECTORY_VERSION)
         return -EINVAL;
-    if (provider->next_cookie == UINT64_MAX ||
-        provider->active == UINT32_MAX)
+    if (provider->active == UINT32_MAX)
         return -EOVERFLOW;
-    cookie = ++provider->next_cookie;
-    ret = idw_ggtt_alloc(provider->ggtt, IDW_HSW_PPGTT_DIRECTORY_BYTES,
-                         provider->alignment, cookie,
-                         IDW_GGTT_ALLOC_RESIDENT | IDW_GGTT_ALLOC_PINNED |
-                             IDW_GGTT_ALLOC_PAGE_DIRECTORY,
-                         &offset);
+    for (;;) {
+        if (provider->next_cookie == UINT64_MAX)
+            return -EOVERFLOW;
+        cookie = ++provider->next_cookie;
+        ret = idw_ggtt_alloc(provider->ggtt, IDW_HSW_PPGTT_DIRECTORY_BYTES,
+                             provider->alignment, cookie,
+                             IDW_GGTT_ALLOC_RESIDENT |
+                                 IDW_GGTT_ALLOC_PINNED |
+                                 IDW_GGTT_ALLOC_PAGE_DIRECTORY,
+                             &offset);
+        if (ret != -EEXIST)
+            break;
+    }
     if (ret)
         return ret;
     ret = zero_directory(provider, offset);
@@ -92,6 +98,10 @@ static void free_directory(void *context,
         !directory->allocation_cookie ||
         !idw_pt_scope_equal(&provider->scope, &directory->scope))
         return;
+    if (idw_hsw_hw_is_active(provider->hw)) {
+        provider->poisoned = 1;
+        return;
+    }
     ret = zero_directory(provider, directory->ggtt_offset);
     if (ret)
         provider->poisoned = 1;

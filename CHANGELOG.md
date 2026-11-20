@@ -1,5 +1,14 @@
 # Change log
 
+## 2026-11-20 — Stage 3A finalization and Stage 3B plan
+- Added checked PPGTT model teardown (`idw_hsw_ppgtt_model_destroy_checked`) that refuses while active or invalidation-pending unless the caller asserts hardware quiescence after reset; the void wrapper passes false and no longer frees tables that hardware may reference.
+- Made GGTT directory release refuse and poison while the hardware abstraction reports active PPGTT.
+- Retried GGTT directory cookie collisions so multiple providers can share one allocator without duplicate-cookie failure.
+- Added simulated reset (`idw_hsw_hw_sim_reset`) and a deactivation-failure regression test proving failed teardown retains active state, restores registers best-effort, poisons, and blocks destroy.
+- Rechecked all Haswell register offsets and masks against Linux i915 headers; no mismatches found.
+- Added `docs/design/HASWELL_GEN75_STAGE3B_PLAN.md` with PCI ownership, BAR, GGTT aperture, GTTADDR, DMA, PPGTT, reset/recovery, and reversible first-experiment prerequisites.
+- `make stage3a-test` and `make stage3a-sanitize-test` pass. No physical GPU operation was performed; i915 remains bound.
+
 ## 2026-11-20 — Stage 3A integration audit
 - Corrected Haswell PPGTT register handling to per-engine MMIO: `PP_DCLV` at ring base + `0x220`, `PP_DIR_BASE` at +`0x228`, `PP_DIR_BASE_READ` at +`0x518`, and `INSTPM` at +`0xc0` for render (`0x2000`), video (`0x12000`), and blitter (`0x22000`). Activation now saves, programs, and restores each selected engine instead of using only the render aliases.
 - Changed activation snapshot to read `PP_DIR_BASE_READ`, and invalidation to post each selected engine's `INSTPM`. Deactivation now attempts disable, invalidate, restore, flush, and posting-read steps even after an earlier failure, then poisons and retains conservative active state.

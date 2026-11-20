@@ -146,6 +146,7 @@ int idw_hsw_hw_sim_write_reg(struct idw_hsw_hw *hw, uint32_t offset,
                              uint32_t value);
 int idw_hsw_hw_sim_read_gtt(const struct idw_hsw_hw *hw, uint64_t offset,
                             uint32_t *value);
+int idw_hsw_hw_sim_reset(struct idw_hsw_hw *hw);
 uint32_t idw_hsw_hw_sim_engine_mask(const struct idw_hsw_hw *hw);
 
 #endif

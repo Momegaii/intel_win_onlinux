@@ -134,6 +134,8 @@ that can refresh i915-bound/exclusive observations before start. Run
 MMIO and do not acquire PCI ownership, map a BAR, write a physical register,
 allocate a physical GGTT range, or prove a page walk. Details:
 [`docs/design/HASWELL_GEN75_STAGE3A_READINESS.md`](docs/design/HASWELL_GEN75_STAGE3A_READINESS.md).
+The Stage 3B prerequisite and dependency plan is in
+[`docs/design/HASWELL_GEN75_STAGE3B_PLAN.md`](docs/design/HASWELL_GEN75_STAGE3B_PLAN.md).
 The CPU-only GPU-VA interval allocator and Haswell Gen7.5 PPGTT software model
 are implemented in `src/gpuva_model.c` and `src/haswell_ppgtt_model.c`; run
 `make ppgtt-model-test` for their unit tests. They use synthetic DMA addresses

@@ -873,3 +873,29 @@ PASS: independent-device ownership, teardown, and recovery tests
 
 ASan/UBSan with leak detection passed. No physical GPU operation was performed;
 i915 remains bound and no hardware register was touched.
+
+
+### Stage 3A finalization and Stage 3B preparation
+
+Completed the Stage 3A integration audit and closed the remaining teardown
+gaps found by comparing the code with Linux i915 and by failure testing:
+
+- Register audit: render/video/blitter bases and ring-relative `PP_DCLV`,
+  `PP_DIR_BASE`, `PP_DIR_BASE_READ`, `INSTPM`, and `RING_MODE_GEN7` match
+  `intel_engine_regs.h`; `PGTBL_CTL`, `GAM_ECOCHK`, `GAC_ECO_BITS`, and
+  `GFX_FLSH_CNTL_GEN6` match `i915_reg.h`/`intel_gt_regs.h`. Masks match.
+- Checked PPGTT model teardown refuses active or invalidation-pending models
+  unless the caller asserts hardware quiescence after reset. The void wrapper
+  passes false and leaves the model allocated rather than freeing tables that
+  hardware may still reference.
+- Directory release refuses and poisons while the hardware abstraction reports
+  active PPGTT. Directory allocation retries cookie collisions when multiple
+  providers share one allocator.
+- Added simulated reset for recovery tests and a deactivation-failure test:
+  a failed engine disable keeps `active` true, restores registers best-effort,
+  poisons, and blocks destroy until reset.
+- Added `docs/design/HASWELL_GEN75_STAGE3B_PLAN.md` covering PCI ownership,
+  BAR mapping, GGTT aperture discovery, GTTADDR access, DMA, PPGTT activation,
+  reset/recovery, and the reversible first page-walk experiment.
+
+No physical GPU operation was performed. i915 remains bound and owns the GPU.

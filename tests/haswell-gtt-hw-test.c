@@ -101,6 +101,9 @@ static int test_directory_and_activation(void)
     struct idw_dma_page_mapping mapping;
     struct idw_hsw_ppgtt_translation translation;
     struct idw_ggtt_allocation_info info;
+    struct idw_ggtt_directory_provider active_provider;
+    struct idw_hsw_ppgtt_directory_ops active_ops;
+    struct idw_hsw_ppgtt_directory second_directory;
     struct fake_pages pages;
     uint32_t pde;
     uint32_t value;
@@ -190,9 +193,38 @@ static int test_directory_and_activation(void)
               hw, IDW_HSW_RING_PP_DIR_BASE(IDW_HSW_VIDEO_RING_BASE),
               0x3000u) == 0);
 
+    {
+        struct idw_hsw_ppgtt_pending_invalidation pending;
+
+        memset(&pending, 0, sizeof(pending));
+        pending.size = sizeof(pending);
+        CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
+        CHECK(pending.pending == 1);
+        CHECK(idw_hsw_ppgtt_invalidation_complete(
+                  model, pending.generation) == 0);
+    }
+    CHECK(idw_hsw_ppgtt_set_active(model, true) == 0);
     CHECK(idw_hsw_hw_activate(hw, IDW_HSW_ENGINE_RENDER |
                                    IDW_HSW_ENGINE_BLITTER,
                               directory_offset) == 0);
+    CHECK(idw_hsw_ppgtt_model_destroy_checked(model, false) == -EBUSY);
+    CHECK(provider.active == 1);
+    CHECK(idw_ggtt_count(ggtt) == 1);
+    CHECK(idw_ggtt_directory_init(&active_provider, ggtt, hw, &scope,
+                                  IDW_HSW_GGTT_RECOMMENDED_ALIGN) == 0);
+    idw_ggtt_directory_ops(&active_provider, &active_ops);
+    memset(&second_directory, 0, sizeof(second_directory));
+    second_directory.size = sizeof(second_directory);
+    second_directory.version = IDW_HSW_PPGTT_DIRECTORY_VERSION;
+    CHECK(active_ops.alloc_directory(active_ops.context,
+                                     &second_directory) == 0);
+    CHECK(active_provider.active == 1);
+    CHECK(idw_ggtt_count(ggtt) == 2);
+    active_ops.free_directory(active_ops.context, &second_directory);
+    CHECK(active_provider.poisoned == 1);
+    CHECK(active_provider.active == 1);
+    CHECK(idw_ggtt_count(ggtt) == 2);
+    CHECK(idw_ggtt_directory_fini(&active_provider) == -EBUSY);
     CHECK(idw_hsw_hw_is_active(hw));
     CHECK(idw_hsw_hw_activate(hw, IDW_HSW_ENGINE_RENDER, 0) == -EBUSY);
     CHECK(idw_hsw_hw_destroy(hw) == -EBUSY);
@@ -222,6 +254,11 @@ static int test_directory_and_activation(void)
     CHECK(idw_hsw_hw_invalidate(hw, IDW_HSW_ENGINE_RENDER) == 0);
     CHECK(idw_hsw_hw_deactivate(hw) == 0);
     CHECK(!idw_hsw_hw_is_active(hw));
+    CHECK(idw_hsw_ppgtt_set_active(model, false) == 0);
+    active_ops.free_directory(active_ops.context, &second_directory);
+    CHECK(active_provider.active == 0);
+    CHECK(idw_ggtt_count(ggtt) == 1);
+    CHECK(idw_ggtt_directory_fini(&active_provider) == -EIO);
     CHECK(idw_hsw_hw_sim_engine_mask(hw) == 0);
     CHECK(idw_hsw_hw_sim_read_reg(hw, IDW_HSW_REG_PP_DCLV, &value) == 0);
     CHECK(value == 0x11111111u);
@@ -262,6 +299,16 @@ static int test_directory_and_activation(void)
     CHECK(idw_hsw_ppgtt_reclaim_empty(model) == 0);
     CHECK(idw_hsw_ppgtt_hardware_pde(model, 0, &pde) == 0);
     CHECK((pde & IDW_HSW_PPGTT_PDE_VALID) != 0);
+    {
+        struct idw_hsw_ppgtt_pending_invalidation pending;
+
+        memset(&pending, 0, sizeof(pending));
+        pending.size = sizeof(pending);
+        CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
+        CHECK(pending.pending == 1);
+        CHECK(idw_hsw_ppgtt_invalidation_complete(
+                  model, pending.generation) == 0);
+    }
 
     CHECK(idw_hsw_hw_sim_fail_next(hw, IDW_HSW_HW_SIM_FAIL_GTT_WRITE) == 0);
     CHECK(idw_hsw_ppgtt_map(model, 0x400000, IDW_GGTT_PAGE_BYTES,
@@ -269,7 +316,7 @@ static int test_directory_and_activation(void)
     CHECK(idw_hsw_hw_is_poisoned(hw));
     CHECK(idw_hsw_ppgtt_translate(model, 0x400000, &translation) == -EIO);
 
-    idw_hsw_ppgtt_model_destroy(model);
+    CHECK(idw_hsw_ppgtt_model_destroy_checked(model, false) == 0);
     model = NULL;
     CHECK(provider.active == 0);
     CHECK(idw_ggtt_count(ggtt) == 0);
@@ -324,6 +371,27 @@ static int test_activation_failures(void)
     CHECK(idw_hsw_hw_activate(hw, IDW_HSW_ENGINE_RENDER, 0x1000) == -EIO);
     CHECK(idw_hsw_hw_is_poisoned(hw));
     CHECK(idw_hsw_hw_check(hw) == -EIO);
+    CHECK(idw_hsw_hw_sim_engine_mask(hw) == 0);
+    CHECK(idw_hsw_hw_destroy(hw) == 0);
+
+    CHECK(idw_hsw_hw_sim_create(&hw, TEST_GGTT_BYTES, &scope) == 0);
+    CHECK(idw_hsw_hw_activate(hw, IDW_HSW_ENGINE_RENDER |
+                                   IDW_HSW_ENGINE_BLITTER, 0x1000) == 0);
+    CHECK(idw_hsw_hw_sim_fail_next(hw, IDW_HSW_HW_SIM_FAIL_ENGINE) == 0);
+    CHECK(idw_hsw_hw_deactivate(hw) == -EIO);
+    CHECK(idw_hsw_hw_is_poisoned(hw));
+    CHECK(idw_hsw_hw_is_active(hw));
+    CHECK((idw_hsw_hw_sim_engine_mask(hw) & IDW_HSW_ENGINE_RENDER) != 0);
+    CHECK((idw_hsw_hw_sim_engine_mask(hw) & IDW_HSW_ENGINE_BLITTER) == 0);
+    CHECK(idw_hsw_hw_sim_read_reg(hw, IDW_HSW_REG_PP_DCLV, &value) == 0);
+    CHECK(value == 0);
+    CHECK(idw_hsw_hw_sim_read_reg(hw, IDW_HSW_REG_PP_DIR_BASE_READ,
+                                  &value) == 0);
+    CHECK(value == 0);
+    CHECK(idw_hsw_hw_destroy(hw) == -EBUSY);
+    CHECK(idw_hsw_hw_sim_reset(hw) == 0);
+    CHECK(!idw_hsw_hw_is_active(hw));
+    CHECK(!idw_hsw_hw_is_poisoned(hw));
     CHECK(idw_hsw_hw_sim_engine_mask(hw) == 0);
     CHECK(idw_hsw_hw_destroy(hw) == 0);
     return 0;

@@ -227,6 +227,19 @@ static int create_model(struct idw_hsw_ppgtt_model **model,
     return idw_hsw_ppgtt_model_create(&page_ops, &directory_ops, model);
 }
 
+static int drain_invalidation(struct idw_hsw_ppgtt_model *model)
+{
+    struct idw_hsw_ppgtt_pending_invalidation pending;
+    int ret;
+
+    memset(&pending, 0, sizeof(pending));
+    pending.size = sizeof(pending);
+    ret = idw_hsw_ppgtt_pending(model, &pending);
+    if (ret || !pending.pending)
+        return ret;
+    return idw_hsw_ppgtt_invalidation_complete(model, pending.generation);
+}
+
 static int test_gpuva_space(void)
 {
     struct idw_gpuva_space space;
@@ -516,7 +529,9 @@ static int test_failed_invalidation_poison(void)
     CHECK(idw_hsw_ppgtt_translate(model, 0, &translation) == -EIO);
     CHECK(idw_hsw_ppgtt_reclaim_empty(model) == -EIO);
     CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == -EIO);
-    idw_hsw_ppgtt_model_destroy(model);
+    CHECK(idw_hsw_ppgtt_model_destroy_checked(model, false) == -EBUSY);
+    CHECK(allocator.allocated != allocator.freed);
+    CHECK(idw_hsw_ppgtt_model_destroy_checked(model, true) == 0);
     CHECK(allocator.allocated == allocator.freed);
     return 0;
 }
@@ -553,6 +568,7 @@ static int test_invalidation_generation_coalescing(void)
     CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == 0);
     CHECK(idw_hsw_ppgtt_set_active(model, true) == 0);
     CHECK(idw_hsw_ppgtt_check_submit(model) == 0);
+    CHECK(idw_hsw_ppgtt_set_active(model, false) == 0);
     idw_hsw_ppgtt_model_destroy(model);
     CHECK(allocator.allocated == allocator.freed);
     return 0;
@@ -582,6 +598,15 @@ static int test_directory_residency_and_writes(void)
     CHECK(idw_hsw_ppgtt_hardware_pde(model, IDW_HSW_PPGTT_PDES,
                                      &hardware) == -EINVAL);
     CHECK(idw_hsw_ppgtt_directory_ggtt_offset(model) == TEST_DIRECTORY_OFFSET);
+    {
+        struct idw_hsw_ppgtt_pending_invalidation pending = {
+            .size = sizeof(pending)
+        };
+
+        CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
+        CHECK(idw_hsw_ppgtt_invalidation_complete(model,
+                                                  pending.generation) == 0);
+    }
     idw_hsw_ppgtt_model_destroy(model);
     CHECK(fake.frees == 1 && fake.allocated == 0);
     CHECK(allocator.allocated == allocator.freed);
@@ -688,6 +713,7 @@ static int test_model_address_boundaries(void)
     CHECK(idw_hsw_ppgtt_translate(model, 0, &translation) == 0);
     CHECK(translation.pte == 0xfffff7f1u);
     CHECK(translation.dma_address == 0x7ffffff000ULL);
+    CHECK(drain_invalidation(model) == 0);
     idw_hsw_ppgtt_model_destroy(model);
     CHECK(allocator.allocated == allocator.freed);
 
@@ -739,6 +765,7 @@ static int test_active_pde_publication_rejected(void)
     CHECK(idw_hsw_ppgtt_translate(model, 4096, &translation) == 0);
     CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
     CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == 0);
+    CHECK(idw_hsw_ppgtt_set_active(model, false) == 0);
     idw_hsw_ppgtt_model_destroy(model);
     CHECK(allocator.allocated == allocator.freed);
     return 0;

@@ -755,6 +755,25 @@ int idw_hsw_hw_sim_write_reg(struct idw_hsw_hw *hw, uint32_t offset,
     return 0;
 }
 
+int idw_hsw_hw_sim_reset(struct idw_hsw_hw *hw)
+{
+    struct idw_hsw_hw_sim *sim = sim_from_hw(hw);
+
+    if (!sim)
+        return -EINVAL;
+    memset(sim->registers, 0, IDW_HSW_SIM_REG_BYTES);
+    memset(sim->gtt, 0, (size_t)sim->ggtt_bytes);
+    sim->fail_mask = 0;
+    sim->fail_once = 0;
+    sim->engines = 0;
+    memset(&sim->stats, 0, sizeof(sim->stats));
+    hw->active = false;
+    hw->active_engines = 0;
+    hw->saved_mask = 0;
+    hw->poisoned = false;
+    return 0;
+}
+
 int idw_hsw_hw_sim_read_gtt(const struct idw_hsw_hw *hw, uint64_t offset,
                             uint32_t *value)
 {

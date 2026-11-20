@@ -94,6 +94,15 @@ int idw_hsw_ppgtt_model_create(
     const struct idw_hsw_ppgtt_page_ops *page_ops,
     const struct idw_hsw_ppgtt_directory_ops *directory_ops,
     struct idw_hsw_ppgtt_model **model);
+/*
+ * Checked teardown refuses while the model is active or an invalidation is
+ * outstanding unless hardware_quiesced is true. Set hardware_quiesced only
+ * after a device reset or confirmed loss of hardware access; it permits
+ * releasing tables that were retired by a failed invalidation. The void
+ * wrapper passes false and leaves the model allocated if teardown refuses.
+ */
+int idw_hsw_ppgtt_model_destroy_checked(struct idw_hsw_ppgtt_model *model,
+                                        bool hardware_quiesced);
 void idw_hsw_ppgtt_model_destroy(struct idw_hsw_ppgtt_model *model);
 int idw_hsw_ppgtt_map(struct idw_hsw_ppgtt_model *model,
                       idw_gpuva va, uint64_t bytes,

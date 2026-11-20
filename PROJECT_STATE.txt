@@ -1,7 +1,25 @@
 IDW PROJECT SNAPSHOT
-Version: 1.1.1-stage3a-integration
+Version: 1.2.0-stage3b-plan
 Target: Intel HD Graphics 4600 / Haswell GT2 / PCI 8086:0412
 Host driver ownership: i915
+
+2026-11-20 Stage 3A finalization and Stage 3B plan:
+Added checked PPGTT model teardown that refuses active or invalidation-pending
+models unless the caller asserts hardware quiescence after reset, so page
+tables and GGTT directories cannot be released while hardware may reference
+them. Directory release now refuses and poisons while the
+hardware abstraction reports active PPGTT. Directory allocation retries
+collisions when multiple providers share one GGTT allocator. Added a simulated
+reset for recovery tests and a deactivation-failure regression test that proves
+failed teardown keeps active state, restores registers best-effort, poisons, and
+blocks destroy. Register offsets and bits were rechecked against Linux i915:
+render/video/blitter bases, ring-relative `PP_DCLV`/`PP_DIR_BASE`/
+`PP_DIR_BASE_READ`/`INSTPM`/`RING_MODE_GEN7`, `PGTBL_CTL`, `GAM_ECOCHK`,
+`GAC_ECO_BITS`, `GFX_FLSH_CNTL_GEN6`, and the documented masks match. Added
+`docs/design/HASWELL_GEN75_STAGE3B_PLAN.md` with PCI ownership, BAR, GGTT
+aperture, GTTADDR, DMA, PPGTT, reset/recovery, and reversible first-experiment
+prerequisites. No physical hardware operation was performed; i915 remains bound
+and owns the GPU.
 
 2026-11-20 Stage 3A integration audit:
 Corrected the Haswell PPGTT register model to per-engine MMIO. `PP_DCLV`,
