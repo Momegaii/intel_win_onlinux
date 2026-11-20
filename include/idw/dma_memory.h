@@ -31,8 +31,11 @@ struct idw_dma_page_info {
 /*
  * The provider storage must be zero-initialized. The owning PCI driver's
  * probe configures both DMA masks before init; init runs from probe and fini
- * from remove after hardware quiescence. The driver serializes provider use
- * against teardown. Fini releases any remaining page allocations.
+ * from remove after hardware quiescence. The PCI core keeps the bound driver
+ * module alive through remove; the driver serializes provider use against
+ * teardown. The provider intentionally does not pin the owner module because
+ * a self-reference would prevent the driver's remove callback from running.
+ * Fini releases any remaining page allocations.
  */
 struct idw_dma_provider {
 	struct device *dev;

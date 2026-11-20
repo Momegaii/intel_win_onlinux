@@ -565,3 +565,71 @@ Therefore the provider's real device allocation and DMA-address result remain
 unverified and Stage 2 is **in progress, not complete**. It is not wired into
 the CPU PPGTT model or the native DMA contract yet. Stage 3 must wait for real
 Stage 2 device-scoped allocations and hardware visibility evidence.
+
+### Stage 2 continuation check
+
+Rechecked the physical device inventory before attempting any native DMA
+operation. The only display device is Haswell `8086:0412` at `0000:00:02.0`,
+still bound to i915; there is no separate IDW-owned GPU. This process runs
+without root privileges, so the kernel test modules were not loaded. No PCI
+driver binding was changed and no DMA allocation or mapping was attempted.
+
+Validation in this continuation: `make test` passed, including available
+i915-backed GEM smoke/lifecycle checks; checks requiring `/dev/idw` skipped
+because the module/device is absent. Both the normal kernel module build and
+warning-enabled (`W=1`) Kbuild passed. These checks do not prove native DMA.
+Stage 2 remains blocked on a safely IDW-owned compatible device; Stage 3 must
+not start until Stage 2's real DMA allocation/mapping and cleanup evidence is
+available.
+
+### QEMU virtual PCI DMA harness
+
+Implemented an opt-in guest test using QEMU's upstream EDU PCI device
+(`1234:11e8`), whose emulated bus-master DMA engine transfers between guest RAM
+and its internal 4 KiB buffer. The guest driver in
+`kernel/idw_edu_dma_test.c` binds only to EDU and calls the existing IDW
+`dma_alloc_coherent()` provider. It checks matching PCI-driver ownership,
+rejects a 32-bit mask, configures the 40-bit mask, checks page and DMA-address
+alignment/range, rejects malformed scope/length/address/cookie descriptors,
+and runs 32 exact 4 KiB device-DMA read-then-write round trips with DMA
+ordering barriers. It retains one page so driver removal exercises the
+provider's outstanding-allocation cleanup.
+
+The test-runner builds modules and a matching-kernel initramfs, boots QEMU with
+TCG only, and uses `isa-debug-exit` to distinguish successful remove cleanup
+from failure or timeout. A `--build-only` mode builds and inspects the guest
+artifacts without claiming DMA execution. Corrected the DMA provider's owner
+module self-reference: pinning the calling PCI driver's module from its own
+probe would prevent unload and therefore prevent the remove callback that
+releases the provider.
+
+Build validation completed: normal kernel-module build, warning-enabled
+(`W=1`) Kbuild, `make test`, guest-init static compilation, shell syntax, and
+build-only initramfs creation all passed. Module metadata matched the guest
+kernel, and the initramfs contains both modules and `/init`. The host has no
+VMX/SVM flags or `/dev/kvm`; the test therefore ran in TCG mode after the
+user-approved installation of Arch package `qemu-system-x86`.
+
+**Executed hardware-backed virtual test:** `make qemu-dma-test` passed on QEMU
+11.1.3, TCG, guest kernel `7.3.5-arch1-1`, with QEMU EDU `1234:11e8` configured
+for a 40-bit DMA mask. The guest driver verified the bound-owner check,
+rejected a 32-bit mask, then initialized the existing provider with its 40-bit
+mask. The log shows a 4 KiB transfer between coherent DMA addresses
+`0x303c000` and `0x303d000`, starting with dword `0x833879b9`; all 4096 bytes
+matched after the EDU device read from guest memory into its internal DMA
+buffer and then wrote that data to the second guest page. The full 32-cycle
+read/write loop passed. Invalid length, scope, DMA-address, and cookie
+descriptors were rejected; a page deliberately retained through test completion
+was freed during PCI remove (`outstanding provider pages=yes result=0`).
+QEMU reported the pass marker and debug-exit status 33. The full successful
+serial output is preserved at
+`tests/qemu-dma/evidence-2026-11-20-tcg.log` (SHA-256
+`ea8de8d1ba5c1c4c8d92e81a5c3d6cbec5e7b9f1adef25dd5efea71776109253`).
+
+This is genuine DMA by QEMU's emulated PCI device through the guest Linux DMA
+API, not a software-only simulation. It validates the provider and lifecycle
+in the virtual environment only; it is **not** physical Haswell DMA proof.
+Stage 2's QEMU validation gate passed, while physical native DMA remains
+unproven and the overall native-DMA stage remains in progress. The host GPU
+`8086:0412` remained bound to i915 throughout; no host PCI binding or ownership
+was changed.

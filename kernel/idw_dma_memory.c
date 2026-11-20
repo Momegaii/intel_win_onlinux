@@ -33,23 +33,15 @@ int idw_dma_provider_init(struct idw_dma_provider *provider,
 	if (dma_get_mask(dev) < IDW_DMA_ADDRESS_MASK ||
 	    dev->coherent_dma_mask < IDW_DMA_ADDRESS_MASK)
 		return -EIO;
-	if (owner && !try_module_get(owner))
-		return -ENODEV;
-
 	cookie = atomic64_inc_return(&idw_next_device_cookie);
 	if ((s64)cookie <= 0) {
-		if (owner)
-			module_put(owner);
 		return -EOVERFLOW;
 	}
 
 	memset(provider, 0, sizeof(*provider));
 	provider->dev = get_device(dev);
-	if (!provider->dev) {
-		if (owner)
-			module_put(owner);
+	if (!provider->dev)
 		return -ENODEV;
-	}
 	provider->owner = owner;
 	provider->device_cookie = cookie;
 	provider->generation = generation;
@@ -65,7 +57,6 @@ int idw_dma_provider_fini(struct idw_dma_provider *provider)
 {
 	struct idw_dma_page *page, *next;
 	struct device *dev;
-	struct module *owner;
 
 	if (!provider)
 		return -EINVAL;
@@ -77,7 +68,6 @@ int idw_dma_provider_fini(struct idw_dma_provider *provider)
 	}
 	provider->active = false;
 	dev = provider->dev;
-	owner = provider->owner;
 	list_for_each_entry_safe(page, next, &provider->pages, link) {
 		list_del(&page->link);
 		dma_free_coherent(dev, PAGE_SIZE, page->cpu_address,
@@ -89,8 +79,6 @@ int idw_dma_provider_fini(struct idw_dma_provider *provider)
 	mutex_unlock(&provider->lock);
 
 	put_device(dev);
-	if (owner)
-		module_put(owner);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(idw_dma_provider_fini);

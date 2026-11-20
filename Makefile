@@ -8,7 +8,7 @@ BUILD := build
 BIN := $(BUILD)/idwctl
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
-.PHONY: all clean test contract-test backend-contract-test i915-resource-test i915-memory-backend-test gpu-submission-test memory-manager-test abi-test ppgtt-model-test cli-test gpu-test gpu-resource-test gpu-memory-test gpu-memory-manager-test gpu-resource-write-test install-user install-system-helper kernel kernel-clean
+.PHONY: all clean test contract-test backend-contract-test i915-resource-test i915-memory-backend-test gpu-submission-test memory-manager-test abi-test ppgtt-model-test cli-test gpu-test gpu-resource-test gpu-memory-test gpu-memory-manager-test gpu-resource-write-test qemu-dma-test install-user install-system-helper kernel kernel-clean
 all: $(BIN)
 $(BUILD)/gpuva_model.o: src/gpuva_model.c include/idw/gpuva_model.h \
 		include/idw/contracts/base.h
@@ -92,6 +92,8 @@ gpu-memory-manager-test: all
 	./tests/gpu-memory-manager-smoke.sh
 gpu-resource-write-test: all
 	./tests/gpu-resource-write-smoke.sh
+qemu-dma-test:
+	./tests/qemu-dma/run.sh
 kernel:
 	$(MAKE) -C $(KDIR) M=$(CURDIR)/kernel modules
 kernel-clean:

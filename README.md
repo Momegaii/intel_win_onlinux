@@ -98,7 +98,7 @@ Haswell is Gen 7.5. Do not assume Gen8+ address-space or command-stream features
 | Stage | Milestone | Proof required | Status |
 |---|---|---|---|
 | 1 | GPU resource read/write | GPU writes data into a managed resource; CPU reads back the exact result. | Complete for the i915-assisted path: Haswell `8086:0412` wrote `0x2468ace0` at resource offset 16 and CPU read it back exactly. |
-| 2 | Native DMA | IDW allocates and maps real DMA memory for its exclusively owned PCI device. | Partial: an ownership-checked kernel DMA-coherent page provider compiles, but has not been called for a real IDW-owned device. i915 is still bound, so Stage 2 is not complete. |
+| 2 | Native DMA | IDW allocates and maps real DMA memory for its exclusively owned PCI device. | In progress: QEMU EDU virtual-device DMA and provider cleanup passed on TCG. Physical Haswell DMA remains unproven; i915 remains bound. |
 | 3 | Hardware PPGTT | GPU uses IDW-created Haswell Gen7.5 page tables. | Not implemented; current page tables are a CPU-only model and i915 owns hardware mappings. |
 | 4 | Independent submission | IDW submits and completes commands without i915 graphics execution. | Not implemented; all demonstrated execution is i915-assisted. |
 | 5 | Scheduler | Multiple contexts, queues, timeout and recovery. | Not implemented independently; existing context/fence tests do not establish an IDW scheduler. |
@@ -129,6 +129,13 @@ device ownership and complete DMA, synchronization, invalidation, and
 activation operations. `make backend-contract-test` tests these boundaries
 with synthetic descriptors; it does not allocate DMA memory or validate GPU
 visibility. i915 remains the sole physical GPU owner.
+
+The opt-in `make qemu-dma-test` runs a separate QEMU TCG guest using QEMU EDU
+(`1234:11e8`) to exercise the kernel DMA provider with actual virtual
+device-side DMA transactions. It is not part of `make test` and does not
+validate Haswell DMA or change host i915 ownership. See
+[`tests/qemu-dma/README.md`](tests/qemu-dma/README.md) for run instructions and
+the evidence required for a pass.
 
 The first integrated memory-lifecycle core is in
 `include/idw/memory_manager.hpp` and `src/memory_manager.cpp`. It composes

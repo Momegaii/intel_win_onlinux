@@ -42,15 +42,17 @@ three full allocation/bind/submit/wait/unbind/destroy lifecycles on Haswell
 `8086:0412` with i915. The manager owns the lifecycle records and references;
 i915 owns GEM backing, context VMs, actual PPGTT mappings, translation and
 execution. Simulated ioctl tests cover timeout/quiescence and cleanup failures;
-the physical run did not inject a timeout or invalidation failure. No native
-DMA provider, hardware IDW PPGTT, or independent GPU ownership is implemented.
+the physical run did not inject a timeout or invalidation failure. The QEMU
+EDU guest test has now validated the native DMA provider against virtual
+device-side transfers; physical Haswell DMA remains unvalidated. Hardware IDW
+PPGTT and independent GPU ownership are not implemented.
 
 ## Eight-stage development sequence
 
 | Stage | Milestone | Proof required | Status |
 |---|---|---|---|
 | 1 | GPU resource read/write | GPU writes data into a managed resource; CPU reads back the exact result. | **Passed, i915-assisted:** Haswell `8086:0412` wrote `0x2468ace0` at offset 16; CPU PREAD verified it after GEM_WAIT. i915 owns execution and mappings. |
-| 2 | Native DMA | IDW allocates and maps real DMA memory for its exclusively owned PCI device. | **In progress, not proven:** ownership-checked kernel DMA-coherent page provider compiles; it has not been invoked on a real IDW-owned device. i915 remains bound. |
+| 2 | Native DMA | IDW allocates and maps real DMA memory for its exclusively owned PCI device. | **In progress:** QEMU EDU virtual-device DMA and remove cleanup passed under TCG; physical Haswell DMA remains unproven and i915 remains bound. See the preserved run log in `tests/qemu-dma/evidence-2026-11-20-tcg.log`. |
 | 3 | Hardware PPGTT | GPU uses IDW-created Haswell Gen7.5 page tables. | Not implemented; existing PPGTT is a CPU-only model. |
 | 4 | Independent submission | IDW submits and completes commands without i915 graphics execution. | Not implemented. |
 | 5 | Scheduler | Multiple contexts, queues, timeout and recovery. | Not implemented independently. |
@@ -80,7 +82,7 @@ DMA provider, hardware IDW PPGTT, or independent GPU ownership is implemented.
 | i915-assisted integrated memory manager | implemented and hardware-tested; i915-owned | `I915AssistedMemoryBackend` connects managed backing, pin/bind, command submission, wait/quiesce, CPU dword access, context-destroy unbind, and GEM cleanup through public i915 ioctls. `make gpu-memory-manager-test` completed three resource lifecycles at `0x10000000`, `0x10001000`, and `0x10002000`. `make gpu-resource-write-test` passed on Haswell `8086:0412`: GPU VA `0x10000010`, initial value `0x13579bdf`, submitted value/readback `0x2468ace0`. Simulated tests cover malformed command encoding, bounds, failed exec/wait/readback, retained submission references, quiescence, and cleanup. i915 owns backing, mapping, PPGTT, translation, execution and scheduling; native DMA and IDW PPGTT remain unimplemented. |
 | GPU-VA interval allocator | CPU-only software model implemented | `src/gpuva_model.c` supports bounded first-fit allocation, alignment, guards, fixed reservations, overlap rejection, and release. It does not own allocations/backing, residency, map references, or hardware GPU addresses. |
 | Haswell Gen7.5 PPGTT CPU model | software table model implemented; physical/hardware validation not run | `src/haswell_ppgtt_model.c` builds 512 PDE slots with 1024-entry/4 KiB PTE tables, uses the upstream Gen6/7 address transform and valid bits with Haswell uncached policy, supports checked map/unmap and software translation, rolls back on allocation/duplicate table-DMA failures, defers empty-table reclamation until matching invalidation acknowledgement, coalesces dirty ranges by generation, and poisons submission checks after invalidation failure. Synthetic DMA addresses and CPU translation are software tests only. |
-| Page-table memory backend boundary | contracts implemented; kernel DMA page provider in progress | `page_table_memory.h` tags page/mapping addresses with device-generation scope and lifetime cookies. The i915-assisted profile rejects native DMA. A separate internal `idw_dma_memory` provider now uses `dma_alloc_coherent` only for an exclusively IDW-driver-bound PCI device, enforces 40-bit DMA range/alignment, and tracks page cookies; it is not wired into the PPGTT contract or exercised on hardware. Synthetic contract tests do not allocate DMA memory. |
+| Page-table memory backend boundary | contracts implemented; provider passed virtual DMA validation | `page_table_memory.h` tags page/mapping addresses with device-generation scope and lifetime cookies. The separate internal `idw_dma_memory` provider uses `dma_alloc_coherent` only for an exclusively IDW-driver-bound PCI device, enforces 40-bit DMA range/alignment, and tracks page cookies; it is not wired into the PPGTT contract. `kernel/idw_edu_dma_test.c` bound to QEMU EDU (`1234:11e8`) and completed 32 verified 4 KiB DMA read/write round trips, rejected invalid descriptors and mask/owner cases, and freed an outstanding provider page during PCI remove. The run used QEMU 11.1.3 TCG, not KVM; it validates the virtual DMA path only, not physical Haswell DMA. |
 | Haswell hardware PPGTT | not implemented | No device DMA mapping, DMA synchronization, hardware page-table publication, GPU TLB invalidation, context activation, MMIO, independent page walk, or physical GPU test. i915 remains the owner. |
 | X: IDW command/fence translation | not implemented | The i915-assisted manager tracks internal submission tickets through completion, but IDW does not yet translate DXGKRNL-style submissions or expose a hardware-independent fence timeline. |
 | P/Q: DRM/KMS integration | research / existing Linux dependency | Uses i915 DRM UAPI for safe observation and GEM smoke test. |
