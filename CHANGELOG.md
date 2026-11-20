@@ -2,6 +2,8 @@
 
 ## 2026-11-20
 
+- Added the first integrated CPU-side memory lifecycle manager over a replaceable backend contract. It combines backing-resource lifetime, GPU-VA reservation/release, binding, invalidation retries, submission references, timeout/quiescence recovery, and safe destruction guards. `make memory-manager-test` covers successful lifecycle, backend failures, unexpected VA, invalidation recovery, multiple submissions, and cleanup. The callbacks are simulated in tests; no i915 adapter or native DMA/PPGTT integration is claimed.
+- Added C++ linkage guards to the existing C GPU-VA allocator declaration so the new C++ manager can reuse the allocator without duplicating it.
 - Recorded the requested development order: GPU memory management, Haswell Gen7.5 PPGTT, hardware submission, scheduler, UMD, display/KMS, and ownership transition only after the independent backend is ready.
 - Added the opt-in `gpu-memory-test` command and `make gpu-memory-test` target. It validates fixed GPU-VA placement and GEM backing advice through i915; it does not implement IDW-owned PPGTT, residency, or forced eviction.
 - Extended the validation to destroy/release a context VM, handle a purged GEM backing by creating a replacement object, verify data, and bind again at the same VAs in a fresh context.

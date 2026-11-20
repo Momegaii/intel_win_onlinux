@@ -8,7 +8,7 @@ BUILD := build
 BIN := $(BUILD)/idwctl
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
-.PHONY: all clean test contract-test backend-contract-test i915-resource-test gpu-submission-test abi-test ppgtt-model-test cli-test gpu-test gpu-resource-test gpu-memory-test install-user install-system-helper kernel kernel-clean
+.PHONY: all clean test contract-test backend-contract-test i915-resource-test gpu-submission-test memory-manager-test abi-test ppgtt-model-test cli-test gpu-test gpu-resource-test gpu-memory-test install-user install-system-helper kernel kernel-clean
 all: $(BIN)
 $(BIN): src/idwctl.cpp src/i915_gem_resource_backend.cpp \
 		src/gpu_submission.cpp include/uapi/idw_ioctl.h \
@@ -38,6 +38,15 @@ gpu-submission-test:
 		src/gpu_submission.cpp tests/gpu-submission-test.cpp \
 		-o $(BUILD)/gpu-submission-test
 	./$(BUILD)/gpu-submission-test
+memory-manager-test:
+	@mkdir -p $(BUILD)
+	$(CC) -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+		-c src/gpuva_model.c -o $(BUILD)/gpuva_model-memory-test.o
+	$(CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -Iinclude \
+		src/memory_manager.cpp $(BUILD)/gpuva_model-memory-test.o \
+		tests/memory-manager-test.cpp \
+		-o $(BUILD)/memory-manager-test
+	./$(BUILD)/memory-manager-test
 abi-test:
 	@mkdir -p $(BUILD)
 	$(CC) -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude -o build/abi-layout-test tests/abi-layout-test.c
@@ -51,7 +60,7 @@ ppgtt-model-test:
 	./build/ppgtt-model-test
 cli-test: all
 	./tests/cli-arguments-smoke.sh
-test: all contract-test backend-contract-test i915-resource-test gpu-submission-test abi-test ppgtt-model-test cli-test
+test: all contract-test backend-contract-test i915-resource-test gpu-submission-test memory-manager-test abi-test ppgtt-model-test cli-test
 	./tests/smoke.sh
 	./tests/gem-resource-backend-smoke.sh
 	./tests/kernel-query-smoke.sh

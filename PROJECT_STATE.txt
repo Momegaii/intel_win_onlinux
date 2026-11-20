@@ -3,6 +3,14 @@ Version: 0.5.0-resource-lifecycle
 Target: Intel HD Graphics 4600 / Haswell GT2 / PCI 8086:0412
 Host driver ownership: i915
 
+2026-11-20 integrated memory lifecycle core:
+`include/idw/memory_manager.hpp` / `src/memory_manager.cpp` now combine
+backing-resource callbacks, CPU GPU-VA reservation, backend binding/unbinding,
+invalidation retry, submission reference protection, and explicit timeout/
+quiescence recovery. `make memory-manager-test` passes with a simulated
+backend. This is a software lifecycle manager only: it is not connected to the
+i915 hardware path or native DMA/PPGTT; i915 remains the physical GPU owner.
+
 Includes a query ioctl, idwctl kernel query, IDW-native miniport lifecycle dispatcher, disposable lifecycle test miniport, and NT primitive shim scaffold. It remains far from a completed WDDM implementation.
 See README.md and docs/IMPLEMENTATION_STATUS.md before loading any kernel code.
 

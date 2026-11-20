@@ -120,6 +120,18 @@ activation operations. `make backend-contract-test` tests these boundaries
 with synthetic descriptors; it does not allocate DMA memory or validate GPU
 visibility. i915 remains the sole physical GPU owner.
 
+The first integrated memory-lifecycle core is in
+`include/idw/memory_manager.hpp` and `src/memory_manager.cpp`. It composes
+backend-owned backing lifetime with the CPU GPU-VA allocator, binds/unbinds
+through callbacks, retains VA reservations until invalidation succeeds, holds
+resource references across submissions, and requires backend quiescence before
+releasing references after an uncertain wait. `make memory-manager-test`
+exercises the full lifecycle, including rollback, timeout, invalidation retry,
+and destruction guards. Its backend is simulated: this core is not yet wired
+to the i915 GEM/context path or to native DMA/PPGTT, so these tests establish
+software lifecycle behavior only. The existing i915 hardware tests remain
+separate and i915-owned.
+
 The user-space i915 GEM resource backend in
 `src/i915_gem_resource_backend.cpp` creates/closes GEM objects, tracks
 `WILLNEED`/`DONTNEED` backing-advice results and `GEM_BUSY` activity samples,

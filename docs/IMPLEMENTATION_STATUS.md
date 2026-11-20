@@ -34,6 +34,14 @@ cleanup passed. No kernel module was loaded; `/dev/idw`-dependent checks skipped
 because it was unavailable. See `SESSION_LOG.md` for the detailed test
 boundary.
 
+The integrated memory-lifecycle core was added after that audit. It composes
+backing callbacks, GPU-VA reservation, binding, invalidation, submission
+references, and explicit recovery in a backend-neutral CPU-side manager.
+`make memory-manager-test` uses a simulated backend and covers success and
+failure lifecycles. No i915 adapter, native DMA provider, hardware PPGTT, or
+residency manager is connected to this new core; its tests are not hardware
+evidence.
+
 | Area | Current status | Reality |
 |---|---|---|
 | GPU discovery / PCI identity | working | Reads sysfs and DRM render-node information. |
@@ -52,6 +60,7 @@ boundary.
 | GPU command submission (i915 path) | implemented and hardware-tested; i915-assisted only | `idwctl gpu-submit` uses the injectable `GpuSubmissionOps` boundary, validates the Haswell two-dword `MI_BATCH_BUFFER_END` + `MI_NOOP` batch, submits it to the i915 render engine, validates the returned 4 KiB-aligned GPU VA, waits up to 5 seconds with GEM_WAIT, and closes the batch/context on success and failures. Final hardware run: 3/3 completions on Haswell `8086:0412`; returned GPU VA `0x011a66000`. Simulated tests cover malformed input, submission failure, timeout, partial creation, and cleanup errors. This is not IDW-owned scheduling or execution. |
 | GPU VM / hardware PPGTT | delegated to i915; IDW CPU model exists | The hardware test uses an i915 context; real address-space creation and page-table management remain inside i915. IDW's separate CPU-only table model is not a GPU mapping and does not program Haswell hardware. |
 | GPU memory management (first validation step) | i915-assisted resource/backing and fixed-VA submission tests passed; native VidMm/residency manager not implemented | `gem-resource-test` validates real GEM create/close, advice, activity and data round-trip without submission. `gpu-memory-test` was run on Haswell/i915: it bound resource and batch objects at `0x10000000` and `0x10100000`, completed no-op submissions before and after advice, destroyed/recreated the context, and rebound at the same VAs. No purge was observed in this run. `GEM_BUSY` reports in-flight activity, not residency. `retained` reports backing existence at the ioctl; DONTNEED makes backing discardable but does not force purge. i915 owns PPGTT, device DMA and residency/placement. |
+| Integrated allocation/VM lifecycle core | software implementation; simulated-backend tests pass | `MemoryManager` composes backend backing ownership, GPU-VA reserve/release, bind/unbind, invalidation retry, submission reference counting, wait/quiescence recovery, and destroy guards. `make memory-manager-test` tests complete success and failure paths. This manager is not yet adapted to i915 or native DMA and does not provide residency/eviction. |
 | GPU-VA interval allocator | CPU-only software model implemented | `src/gpuva_model.c` supports bounded first-fit allocation, alignment, guards, fixed reservations, overlap rejection, and release. It does not own allocations/backing, residency, map references, or hardware GPU addresses. |
 | Haswell Gen7.5 PPGTT CPU model | software table model implemented; physical/hardware validation not run | `src/haswell_ppgtt_model.c` builds 512 PDE slots with 1024-entry/4 KiB PTE tables, uses the upstream Gen6/7 address transform and valid bits with Haswell uncached policy, supports checked map/unmap and software translation, rolls back on allocation/duplicate table-DMA failures, defers empty-table reclamation until matching invalidation acknowledgement, coalesces dirty ranges by generation, and poisons submission checks after invalidation failure. Synthetic DMA addresses and CPU translation are software tests only. |
 | Page-table memory backend boundary | device-scope contract and validators implemented; no real DMA provider | `page_table_memory.h` tags page/mapping addresses with device-generation scope and lifetime cookies. The i915-assisted profile reports GEM/VM-bind/exec-wait capabilities only and rejects DMA-page-table requests. The native DMA contract requires exclusive device ownership and complete allocation/map/sync/invalidation/activation operations; its validator is structural only. Synthetic contract tests do not allocate DMA memory. |

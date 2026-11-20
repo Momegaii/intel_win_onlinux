@@ -367,3 +367,50 @@ GCC `-fanalyzer` on submission/integration code, and ASan/UBSan with leak
 detection on submission failure/timeout/cleanup tests. Existing libdrm header
 `-Wpedantic` warnings remain. `/dev/idw` integration checks skipped because
 the module was not loaded.
+
+## Integrated memory-lifecycle core
+
+Added `include/idw/memory_manager.hpp` and `src/memory_manager.cpp` to compose
+the existing GPU-VA interval allocator with backend-managed backing resources,
+binding/unbinding, invalidation, submissions, and destruction. The manager
+rounds backing sizes to pages, reserves GPU VA before binding, and releases the
+reservation only after unbind plus invalidation complete. A failed operation
+retains enough state for explicit binding recovery. A backend-returned VA that
+does not match the reservation is treated as a consistency fault; new binds and
+submissions are blocked until its mapping is removed and invalidated.
+
+Each submitted resource receives a manager-held reference until a successful
+wait or explicit backend quiescence recovery. Timeouts and uncertain wait
+errors retain the reference, so unbind/destroy remain busy. Backing destruction
+failure likewise leaves the allocation tracked and retryable. The manager
+requires caller-side serialization. It is backend-neutral and currently
+exercised only with a simulated callback backend; it is not wired to the i915
+GEM/context path and does not implement native DMA, PPGTT, residency, or
+eviction. Existing physical GPU evidence remains i915-assisted.
+
+Added `make memory-manager-test` to the regular test suite. Tests cover rounded
+allocation size, complete allocate/bind/submit/wait/unbind/invalidate/destroy
+lifecycle, reference-protected destruction, failed backing create, failed bind
+rollback, failed unbind and invalidation retry, unexpected backend VA and
+recovery, multiple outstanding tickets, wait timeout, failed and successful
+quiescence, malformed zero-fence recovery, backing-destroy retry, invalid
+arguments, and shutdown guards. The
+first compile attempt exposed that `gpuva_model.h` lacked C++ linkage guards; those
+were added so the manager links to the existing C implementation rather than
+duplicating it.
+
+Validation completed:
+
+- `make memory-manager-test` passed with strict C11/C++17 warnings-as-errors.
+- `make test` passed, including the new lifecycle tests and existing i915 GEM
+  smoke tests. `/dev/idw`-dependent tests skipped because `/dev/idw` is absent.
+- `make kernel` passed; no kernel modules were loaded.
+- AddressSanitizer and UndefinedBehaviorSanitizer with leak detection passed
+  for the new manager and GPU-VA allocator tests.
+- GCC `-fanalyzer` passed for `memory_manager.cpp` and `gpuva_model.c`.
+- `git diff --check` passed. The existing external libdrm `-Wpedantic` warnings
+  remain unrelated to the new manager.
+
+The i915 GEM smoke test in `make test` is hardware-backed, but the integrated
+memory-manager tests remain simulated. No hardware run exercised the new
+manager; i915 remains the only physical GPU owner.

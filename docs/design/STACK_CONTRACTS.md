@@ -109,6 +109,15 @@ tests in `make ppgtt-model-test`. They validate software structures using
 synthetic DMA addresses; they do not map pages for a device or program/invalidate
 GPU page tables.
 
+`include/idw/memory_manager.hpp` and `src/memory_manager.cpp` add a CPU-side
+allocation lifecycle coordinator over a replaceable backend callback table.
+It tracks backing objects, address reservations, backend bindings, invalidation
+recovery, and submission references. A timed-out or failed wait does not drop
+the reference; the backend must positively confirm quiescence before recovery
+releases it. The test backend is simulated and does not integrate with i915 or
+native DMA. The i915 hardware validation path remains separate, and the manager
+must not be described as IDW-owned hardware memory management.
+
 Page allocations and page-sized mapped addresses are tagged with an opaque
 device scope and lifetime cookie. The CPU model rejects cross-scope table pages
 and PTE mappings. These test tokens are synthetic; their validation does not
