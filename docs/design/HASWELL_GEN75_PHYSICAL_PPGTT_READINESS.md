@@ -164,7 +164,7 @@ The CPU-side correctness blockers are fixed: separate PDE/PTE encoders,
 distinct 40-bit/39-bit limits, GGTT-resident directory modeling with GTTADDR
 writes, and scratch-table retention with deferred reclamation. The model is
 still not a hardware-publication implementation. Remaining physical blockers
-are a real GGTT allocator and MMIO GTTADDR path, register ownership, TLB/GGTT
+are a hardware GGTT aperture allocator and MMIO GTTADDR path, register ownership, TLB/GGTT
 invalidation, VM activation, cache-policy selection, coherency/IOMMU behavior,
 and physical evidence.
 
@@ -326,7 +326,7 @@ this investigation.
 | Register | Offset | Purpose | i915 use | IDW status |
 |---|---:|---|---|---|
 | `PP_DCLV` | `0x2220` (64-bit) | PPGTT directory cacheline valid; bits 31:0 enable 16-entry groups | Writes `PP_DIR_DCLV_2G` (`0xffffffff`) | Not owned; no write path |
-| `PP_DIR_BASE` | `0x2228` | Page-directory base offset in GGTT | Writes per-engine `pp_dir` byte offset | Not owned; no GGTT allocator |
+| `PP_DIR_BASE` | `0x2228` | Page-directory base offset in GGTT | Writes per-engine `pp_dir` byte offset | Not owned; no hardware GGTT allocator |
 | `GFX_MODE` / `RING_MODE_GEN7` | `0x229c` (render; per-engine base + `0x29c`) | Per-process GTT enable, bit 9 | Sets `GFX_PPGTT_ENABLE` for Gen7+ | Not owned |
 | `INSTPM` | `0x20c0` (render; per-engine base + `0xc0`) | TLB invalidate bit 9, sync flush bit 5 | Uses both for engine TLB invalidation | Not owned |
 | `GFX_FLSH_CNTL_GEN6` | `0x101008` | GGTT flush, bit 0 | Used by `gen6_ggtt_invalidate()` | Not owned |
@@ -584,17 +584,27 @@ Would not prove:
 - [x] Run ASan/UBSan on the PPGTT and adapter tests.
 - [x] Re-run the QEMU EDU page-table test with corrected independent expected
   values; keep it as storage evidence only.
-- [ ] Add a software simulator for the register sequence if useful, but label
-  it simulated.
+- [x] Add a software simulator for the register sequence; it is labeled
+  simulated.
 
 ### Phase C — Exclusive-ownership prerequisites
 
-- Implement PCI ownership, BAR mapping, forcewake/power wells, GPU reset, and
-  engine/ring setup.
-- Implement a GGTT allocator and GTTADDR mapping.
-- Implement register save/restore and a tested recovery path.
-- Implement coherent DMA page allocation with the corrected limits.
-- Prove all of this on a disposable system before any PPGTT write.
+Software infrastructure completed in Stage 3A; real hardware prerequisites
+remain open.
+
+- [ ] Implement PCI ownership, BAR mapping, forcewake/power wells, GPU reset,
+  and engine/ring setup.
+- [x] Implement a checked GGTT allocator and a GTTADDR mapping abstraction.
+  The allocator and hardware abstraction are tested with a simulated backend;
+  no real MMIO or aperture ownership exists.
+- [x] Implement register save/restore and a tested activation/deactivation
+  rollback path in the hardware abstraction. This is software-state evidence
+  only.
+- [ ] Implement coherent DMA page allocation with the corrected limits in the
+  real independent-device path.
+- [ ] Prove all of this on a disposable system before any PPGTT write.
+
+See `docs/design/HASWELL_GEN75_STAGE3A_READINESS.md`.
 
 ### Phase D — Minimal physical page walk
 
@@ -657,7 +667,8 @@ This plan is ready for implementation review only when all items are checked:
 - [ ] PRM revision and Haswell SKU/stepping are recorded.
 - [ ] PTE 39-bit and PDE 40-bit address rules are confirmed on the target.
 - [ ] PD alignment (4 KiB vs 64 KiB) is resolved.
-- [ ] GGTT allocation and GTTADDR write path are designed.
+- [x] GGTT allocation and GTTADDR write path are designed and software-tested;
+  real aperture ownership and MMIO remain open.
 - [ ] PDE cache and context-inactive rules are understood.
 - [ ] PTE/PDE invalidation sequence and completion are specified.
 - [ ] `ECOCHK`/`GAC_ECO_BITS` policy is decided.
@@ -666,7 +677,8 @@ This plan is ready for implementation review only when all items are checked:
   model.
 - [x] Separate PDE/PTE encoders and distinct 40-bit/39-bit limits are tested.
 - [x] A GGTT-resident directory provider and GTTADDR write path are modeled.
-- [ ] Register save/restore and recovery are tested.
+- [x] Register save/restore and activation rollback are tested against the
+  software simulator; real MMIO recovery remains open.
 - [ ] The experiment is approved for a disposable system only.
 - [ ] No step requires i915 to remain bound during the physical run.
 
@@ -680,7 +692,11 @@ hand-derived golden vectors, boundaries, directory residency, live-PDE safety,
 and rollback. QEMU EDU page-table storage evidence was regenerated with the
 corrected PTE encoding.
 
-None of that is hardware page-table publication. There is still no real GGTT
-allocator, MMIO GTTADDR path, register programming, TLB invalidation, VM
-activation, or physical GPU page-walk evidence. i915 remains the physical GPU
-owner.
+None of that is hardware page-table publication. Stage 3A now supplies a
+checked GGTT allocator, a GTTADDR/flush/invalidate/activation abstraction with
+saved-register rollback, a GGTT-backed directory provider, and an
+independent-device ownership/teardown/recovery lifecycle, all tested with a
+simulated backend. There is still no real PCI ownership, BAR mapping, MMIO
+GTTADDR path, physical GGTT aperture ownership, register programming, TLB
+invalidation, VM activation, or physical GPU page-walk evidence. i915 remains
+the physical GPU owner. See `HASWELL_GEN75_STAGE3A_READINESS.md`.

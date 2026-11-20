@@ -798,3 +798,44 @@ owner. Stage 3 remains not implemented: there is no real GGTT allocator, MMIO
 GTTADDR path, register-level invalidation, VM activation, or physical page-walk
 evidence. The audit's four software findings above are corrected; its
 register-level and physical findings remain open.
+
+### Stage 3A — GGTT/PPGTT software infrastructure
+
+Implemented the Stage 3A software gate without touching the physical GPU.
+
+- `src/ggtt_allocator.c`: checked first-fit GGTT interval allocator over a
+  caller-supplied aperture, with 4 KiB granularity, alignment, fixed
+  reservations, unique cookies, stale-free rejection, pin/resident state,
+  device-scoped DMA binding, and teardown refusal while live.
+- `src/haswell_gtt_hw.c`: GTTADDR read/write, GGTT flush, TLB invalidation, and
+  per-engine PPGTT activation/deactivation. Activation snapshots
+  `PP_DCLV`/`PP_DIR_BASE`, rolls back enabled engines and restores registers on
+  failure, and poisons on GTT-access, invalidation, or rollback failure. Added
+  an explicit software simulator with fault injection. No MMIO is issued.
+- `src/ggtt_directory.c`: GGTT-backed 4 KiB page-directory provider that
+  allocates, zeroes, writes, reads, flushes, and frees through GTTADDR. The
+  corrected CPU PPGTT model is tested against it.
+- `src/device_lifecycle.c`: staged independent-device ownership lifecycle.
+  Rejects start while i915 is bound or ownership is not exclusive, optionally
+  requires `8086:0412`, runs ordered stages, rolls back in reverse, recovers
+  only after clean teardown, and poisons on cleanup failure.
+
+Focused validation:
+
+```text
+PASS: GGTT allocator, residency, binding, and teardown tests
+PASS: Haswell GGTT directory, hardware sequence, and rollback tests
+PASS: independent-device ownership, teardown, and recovery tests
+```
+
+ASan/UBSan with leak detection passed for all three focused tests.
+`make kernel CC=gcc W=1` passed; no module was loaded. The full `make test` run
+passed every software target and stopped at `tests/smoke.sh` because this
+environment has no Intel DRM render node; that is an environment limitation.
+No physical GPU test was run.
+
+No PCI ownership was acquired, i915 was not unbound, no BAR or MMIO register
+was touched, no GGTT aperture was allocated on hardware, and no physical page
+walk is claimed. Stage 3 remains not implemented; Stage 3A supplies software
+infrastructure and simulated-MMIO evidence only. Details:
+`docs/design/HASWELL_GEN75_STAGE3A_READINESS.md`.

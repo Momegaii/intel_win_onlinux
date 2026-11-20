@@ -27,6 +27,8 @@ IDW is a Windows-inspired graphics-kernel architecture project for Linux. The Aâ
 ```bash
 sudo pacman -S --needed base-devel gcc libdrm pkgconf python tk
 make
+make stage3a-test
+make stage3a-sanitize-test
 make test
 make install-user
 ```
@@ -99,7 +101,7 @@ Haswell is Gen 7.5. Do not assume Gen8+ address-space or command-stream features
 |---|---|---|---|
 | 1 | GPU resource read/write | GPU writes data into a managed resource; CPU reads back the exact result. | Complete for the i915-assisted path: Haswell `8086:0412` wrote `0x2468ace0` at resource offset 16 and CPU read it back exactly. |
 | 2 | Native DMA | IDW allocates and maps real DMA memory for its exclusively owned PCI device. | In progress: QEMU EDU virtual-device DMA, page-table DMA copy, and provider cleanup passed on TCG. Physical Haswell DMA remains unproven; i915 remains bound. See `tests/qemu-dma/evidence-2026-11-20-tcg-page-table-corrected.log`. |
-| 3 | Hardware PPGTT | GPU uses IDW-created Haswell Gen7.5 page tables. | Not implemented. The CPU model now has separate 40-bit PDE/39-bit PTE encoders, GGTT-resident directory modeling with GTTADDR writes, active/quiesced publication rules, and scratch-PDE retention. A real GGTT allocator, MMIO path, register-level invalidation/activation, and physical page walk remain missing. i915 owns hardware mappings. See `docs/design/HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md`. |
+| 3 | Hardware PPGTT | GPU uses IDW-created Haswell Gen7.5 page tables. | **Stage 3A software infrastructure implemented; physical path not implemented.** The CPU model has separate 40-bit PDE/39-bit PTE encoders, GGTT-resident directory modeling with GTTADDR writes, active/quiesced publication rules, and scratch-PDE retention. A checked GGTT allocator, Haswell GTTADDR/flush/invalidate/activation abstraction with a simulated backend, a GGTT directory provider, and an independent-device ownership/teardown/recovery lifecycle are tested. Real PCI ownership, MMIO, platform GGTT aperture ownership, cache policy, and a physical page walk remain missing. i915 owns hardware mappings. See `docs/design/HASWELL_GEN75_STAGE3A_READINESS.md`. |
 | 4 | Independent submission | IDW submits and completes commands without i915 graphics execution. | Not implemented; all demonstrated execution is i915-assisted. |
 | 5 | Scheduler | Multiple contexts, queues, timeout and recovery. | Not implemented independently; existing context/fence tests do not establish an IDW scheduler. |
 | 6 | UMD | Real shader compilation and rendering. | Not implemented. |
@@ -121,6 +123,16 @@ That audit's CPU-side findings are now corrected: separate PDE/PTE encoders,
 40-bit page-table and 39-bit mapped-page limits, a GGTT-resident directory
 provider with GTTADDR PDE writes, and scratch-table retention with deferred
 reclamation. No hardware state was changed and i915 remains bound.
+
+Stage 3A adds the software gate before hardware use: a checked GGTT interval
+allocator with residency/pin/binding state, a Haswell GTTADDR/flush/invalidate/
+per-engine-activation abstraction with saved-register rollback and poison on
+uncertain state, an explicit simulated backend, a GGTT-backed page-directory
+provider, and a staged independent-device ownership lifecycle. Run
+`make stage3a-test` and `make stage3a-sanitize-test`. These tests use simulated
+MMIO and do not acquire PCI ownership, map a BAR, write a physical register,
+allocate a physical GGTT range, or prove a page walk. Details:
+[`docs/design/HASWELL_GEN75_STAGE3A_READINESS.md`](docs/design/HASWELL_GEN75_STAGE3A_READINESS.md).
 The CPU-only GPU-VA interval allocator and Haswell Gen7.5 PPGTT software model
 are implemented in `src/gpuva_model.c` and `src/haswell_ppgtt_model.c`; run
 `make ppgtt-model-test` for their unit tests. They use synthetic DMA addresses

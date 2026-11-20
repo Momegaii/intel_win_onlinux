@@ -1,0 +1,634 @@
+/* SPDX-License-Identifier: MIT */
+#include "../include/idw/haswell_gtt_hw.h"
+
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define IDW_HSW_SIM_REG_BYTES 0x200000u
+#define IDW_HSW_SIM_REG_WORDS (IDW_HSW_SIM_REG_BYTES / 4u)
+#define IDW_HSW_SIM_MAX_GGTT_BYTES (64ull * 1024u * 1024u)
+
+struct idw_hsw_hw {
+    struct idw_hsw_hw_ops ops;
+    void *context;
+    struct idw_device_scope scope;
+    uint64_t ggtt_bytes;
+    uint32_t flags;
+    uint32_t active_engines;
+    uint32_t saved_dclv;
+    uint32_t saved_dir_base;
+    bool initialized;
+    bool active;
+    bool poisoned;
+};
+
+static bool engine_mask_valid(uint32_t mask)
+{
+    return mask && !(mask & ~IDW_HSW_ENGINE_ALL);
+}
+
+static bool directory_valid(const struct idw_hsw_hw *hw, uint64_t directory)
+{
+    return !(directory & (IDW_HSW_GGTT_MIN_ALIGN - 1)) &&
+           directory <= hw->ggtt_bytes &&
+           hw->ggtt_bytes - directory >= IDW_HSW_PPGTT_DIRECTORY_GGTT_BYTES;
+}
+
+static void poison(struct idw_hsw_hw *hw)
+{
+    hw->poisoned = true;
+}
+
+static int restore_registers(struct idw_hsw_hw *hw)
+{
+    int ret;
+
+    ret = hw->ops.write32(hw->context, IDW_HSW_REG_PP_DCLV,
+                          hw->saved_dclv);
+    if (ret)
+        return ret;
+    return hw->ops.write32(hw->context, IDW_HSW_REG_PP_DIR_BASE,
+                           hw->saved_dir_base);
+}
+
+static int disable_engines(struct idw_hsw_hw *hw, uint32_t mask)
+{
+    uint32_t engines[] = {
+        IDW_HSW_ENGINE_RENDER, IDW_HSW_ENGINE_BLITTER, IDW_HSW_ENGINE_VIDEO
+    };
+    uint32_t i;
+    int first_error = 0;
+    int ret;
+
+    for (i = 0; i < sizeof(engines) / sizeof(engines[0]); ++i) {
+        if (!(mask & engines[i]))
+            continue;
+        ret = hw->ops.set_engine_ppgtt(hw->context, engines[i], false);
+        if (ret && !first_error)
+            first_error = ret;
+    }
+    return first_error;
+}
+
+static int rollback_activation(struct idw_hsw_hw *hw, uint32_t enabled)
+{
+    int ret;
+    int first_error;
+
+    first_error = disable_engines(hw, enabled);
+    ret = restore_registers(hw);
+    if (ret && !first_error)
+        first_error = ret;
+    ret = hw->ops.gtt_flush(hw->context);
+    if (ret && !first_error)
+        first_error = ret;
+    if (hw->ops.posting_read) {
+        uint32_t value;
+
+        ret = hw->ops.posting_read(hw->context,
+                                   IDW_HSW_REG_GFX_FLSH_CNTL_GEN6, &value);
+        if (ret && !first_error)
+            first_error = ret;
+    }
+    if (first_error)
+        poison(hw);
+    return first_error;
+}
+
+int idw_hsw_hw_init(const struct idw_hsw_hw_config *config,
+                    const struct idw_hsw_hw_ops *ops, void *context,
+                    struct idw_hsw_hw **hw)
+{
+    struct idw_hsw_hw *created;
+
+    if (!hw)
+        return -EINVAL;
+    *hw = NULL;
+    if (!config || !ops || config->size != sizeof(*config) ||
+        config->version != IDW_HSW_HW_VERSION ||
+        (config->flags & ~(IDW_HSW_HW_EXCLUSIVE_OWNER |
+                           IDW_HSW_HW_SIMULATED)) ||
+        !config->scope.device_cookie || !config->scope.generation ||
+        !config->ggtt_bytes || config->ggtt_bytes > UINT32_MAX ||
+        (config->ggtt_bytes & (IDW_HSW_GGTT_MIN_ALIGN - 1)) ||
+        ops->size != sizeof(*ops) || ops->version != IDW_HSW_HW_VERSION ||
+        !ops->read32 || !ops->write32 || !ops->gtt_read32 ||
+        !ops->gtt_write32 || !ops->gtt_flush || !ops->invalidate_tlb ||
+        !ops->set_engine_ppgtt || !ops->posting_read)
+        return -EINVAL;
+    if (!(config->flags & IDW_HSW_HW_SIMULATED) &&
+        !(config->flags & IDW_HSW_HW_EXCLUSIVE_OWNER))
+        return -EPERM;
+
+    created = calloc(1, sizeof(*created));
+    if (!created)
+        return -ENOMEM;
+    created->ops = *ops;
+    created->context = context;
+    created->scope = config->scope;
+    created->ggtt_bytes = config->ggtt_bytes;
+    created->flags = config->flags;
+    created->initialized = true;
+    *hw = created;
+    return 0;
+}
+
+int idw_hsw_hw_destroy(struct idw_hsw_hw *hw)
+{
+    if (!hw)
+        return -EINVAL;
+    if (hw->active)
+        return -EBUSY;
+    if (hw->ops.release)
+        hw->ops.release(hw->context);
+    memset(hw, 0, sizeof(*hw));
+    free(hw);
+    return 0;
+}
+
+int idw_hsw_hw_write_pde(struct idw_hsw_hw *hw, uint64_t directory_ggtt,
+                         uint32_t index, uint32_t pde)
+{
+    uint64_t offset;
+    int ret;
+
+    ret = idw_hsw_hw_check(hw);
+    if (ret)
+        return ret;
+    if (index >= IDW_HSW_PPGTT_DIRECTORY_PDES ||
+        !directory_valid(hw, directory_ggtt))
+        return -ERANGE;
+    offset = directory_ggtt + (uint64_t)index * IDW_HSW_PPGTT_PDE_BYTES;
+    ret = hw->ops.gtt_write32(hw->context, offset, pde);
+    if (ret)
+        poison(hw);
+    return ret;
+}
+
+int idw_hsw_hw_read_pde(struct idw_hsw_hw *hw, uint64_t directory_ggtt,
+                        uint32_t index, uint32_t *pde)
+{
+    uint64_t offset;
+    int ret;
+
+    ret = idw_hsw_hw_check(hw);
+    if (ret)
+        return ret;
+    if (!pde)
+        return -EINVAL;
+    if (index >= IDW_HSW_PPGTT_DIRECTORY_PDES ||
+        !directory_valid(hw, directory_ggtt))
+        return -ERANGE;
+    offset = directory_ggtt + (uint64_t)index * IDW_HSW_PPGTT_PDE_BYTES;
+    ret = hw->ops.gtt_read32(hw->context, offset, pde);
+    if (ret)
+        poison(hw);
+    return ret;
+}
+
+int idw_hsw_hw_flush_gtt(struct idw_hsw_hw *hw)
+{
+    uint32_t value;
+    int ret;
+
+    ret = idw_hsw_hw_check(hw);
+    if (ret)
+        return ret;
+    ret = hw->ops.gtt_flush(hw->context);
+    if (ret) {
+        poison(hw);
+        return ret;
+    }
+    ret = hw->ops.posting_read(hw->context,
+                               IDW_HSW_REG_GFX_FLSH_CNTL_GEN6, &value);
+    if (ret)
+        poison(hw);
+    return ret;
+}
+
+int idw_hsw_hw_invalidate(struct idw_hsw_hw *hw, uint32_t engine_mask)
+{
+    uint32_t value;
+    int ret;
+
+    ret = idw_hsw_hw_check(hw);
+    if (ret)
+        return ret;
+    if (!engine_mask_valid(engine_mask))
+        return -EINVAL;
+    ret = hw->ops.invalidate_tlb(hw->context, engine_mask);
+    if (ret) {
+        poison(hw);
+        return ret;
+    }
+    ret = hw->ops.posting_read(hw->context, IDW_HSW_REG_INSTPM, &value);
+    if (ret)
+        poison(hw);
+    return ret;
+}
+
+int idw_hsw_hw_activate(struct idw_hsw_hw *hw, uint32_t engine_mask,
+                        uint64_t directory_ggtt)
+{
+    uint32_t engines[] = {
+        IDW_HSW_ENGINE_RENDER, IDW_HSW_ENGINE_BLITTER, IDW_HSW_ENGINE_VIDEO
+    };
+    uint32_t enabled = 0;
+    uint32_t i;
+    int ret;
+
+    ret = idw_hsw_hw_check(hw);
+    if (ret)
+        return ret;
+    if (hw->active)
+        return -EBUSY;
+    if (!engine_mask_valid(engine_mask) ||
+        !directory_valid(hw, directory_ggtt))
+        return -EINVAL;
+    ret = idw_hsw_hw_flush_gtt(hw);
+    if (ret)
+        return ret;
+    ret = hw->ops.read32(hw->context, IDW_HSW_REG_PP_DCLV,
+                         &hw->saved_dclv);
+    if (ret) {
+        poison(hw);
+        return ret;
+    }
+    ret = hw->ops.read32(hw->context, IDW_HSW_REG_PP_DIR_BASE,
+                         &hw->saved_dir_base);
+    if (ret) {
+        poison(hw);
+        return ret;
+    }
+    ret = hw->ops.write32(hw->context, IDW_HSW_REG_PP_DCLV,
+                          IDW_HSW_PP_DIR_DCLV_2G);
+    if (ret) {
+        if (rollback_activation(hw, 0))
+            return -EIO;
+        return ret;
+    }
+    ret = hw->ops.write32(hw->context, IDW_HSW_REG_PP_DIR_BASE,
+                          (uint32_t)directory_ggtt);
+    if (ret) {
+        if (rollback_activation(hw, 0))
+            return -EIO;
+        return ret;
+    }
+    for (i = 0; i < sizeof(engines) / sizeof(engines[0]); ++i) {
+        if (!(engine_mask & engines[i]))
+            continue;
+        ret = hw->ops.set_engine_ppgtt(hw->context, engines[i], true);
+        if (ret) {
+            if (rollback_activation(hw, enabled | engines[i]))
+                return -EIO;
+            return ret;
+        }
+        enabled |= engines[i];
+    }
+    ret = hw->ops.invalidate_tlb(hw->context, engine_mask);
+    if (ret) {
+        poison(hw);
+        rollback_activation(hw, enabled);
+        return ret;
+    }
+    hw->active = true;
+    hw->active_engines = engine_mask;
+    return 0;
+}
+
+int idw_hsw_hw_deactivate(struct idw_hsw_hw *hw)
+{
+    uint32_t value;
+    int ret;
+
+    ret = idw_hsw_hw_check(hw);
+    if (ret)
+        return ret;
+    if (!hw->active)
+        return -EINVAL;
+    ret = disable_engines(hw, hw->active_engines);
+    if (ret) {
+        poison(hw);
+        return ret;
+    }
+    ret = hw->ops.invalidate_tlb(hw->context, hw->active_engines);
+    if (ret) {
+        poison(hw);
+        return ret;
+    }
+    ret = restore_registers(hw);
+    if (ret) {
+        poison(hw);
+        return ret;
+    }
+    ret = hw->ops.gtt_flush(hw->context);
+    if (ret) {
+        poison(hw);
+        return ret;
+    }
+    ret = hw->ops.posting_read(hw->context,
+                               IDW_HSW_REG_GFX_FLSH_CNTL_GEN6, &value);
+    if (ret) {
+        poison(hw);
+        return ret;
+    }
+    hw->active = false;
+    hw->active_engines = 0;
+    return 0;
+}
+
+int idw_hsw_hw_get_scope(const struct idw_hsw_hw *hw,
+                         struct idw_device_scope *scope)
+{
+    if (!hw || !scope)
+        return -EINVAL;
+    *scope = hw->scope;
+    return 0;
+}
+
+int idw_hsw_hw_check(const struct idw_hsw_hw *hw)
+{
+    if (!hw || !hw->initialized)
+        return -EINVAL;
+    return hw->poisoned ? -EIO : 0;
+}
+
+int idw_hsw_hw_is_active(const struct idw_hsw_hw *hw)
+{
+    return hw && hw->active;
+}
+
+int idw_hsw_hw_is_poisoned(const struct idw_hsw_hw *hw)
+{
+    return hw && hw->poisoned;
+}
+
+struct idw_hsw_hw_sim {
+    uint32_t *registers;
+    uint32_t *gtt;
+    uint64_t ggtt_bytes;
+    uint32_t fail_mask;
+    uint32_t fail_once;
+    uint32_t engines;
+    struct idw_hsw_hw_sim_stats stats;
+};
+
+static bool sim_fail(struct idw_hsw_hw_sim *sim, uint32_t flag)
+{
+    if (sim->fail_mask & flag)
+        return true;
+    if (sim->fail_once & flag) {
+        sim->fail_once &= ~flag;
+        return true;
+    }
+    return false;
+}
+
+static int sim_read32(void *context, uint32_t offset, uint32_t *value)
+{
+    struct idw_hsw_hw_sim *sim = context;
+
+    if (!value || (offset & 3u) || offset > IDW_HSW_SIM_REG_BYTES - 4u)
+        return -EINVAL;
+    if (sim_fail(sim, IDW_HSW_HW_SIM_FAIL_READ))
+        return -EIO;
+    *value = sim->registers[offset / 4u];
+    ++sim->stats.reads;
+    return 0;
+}
+
+static int sim_write32(void *context, uint32_t offset, uint32_t value)
+{
+    struct idw_hsw_hw_sim *sim = context;
+
+    if ((offset & 3u) || offset > IDW_HSW_SIM_REG_BYTES - 4u)
+        return -EINVAL;
+    if (sim_fail(sim, IDW_HSW_HW_SIM_FAIL_WRITE))
+        return -EIO;
+    sim->registers[offset / 4u] = value;
+    ++sim->stats.writes;
+    return 0;
+}
+
+static int sim_gtt_read32(void *context, uint64_t offset, uint32_t *value)
+{
+    struct idw_hsw_hw_sim *sim = context;
+
+    if (!value || (offset & 3u) || offset > sim->ggtt_bytes - 4u)
+        return -EINVAL;
+    if (sim_fail(sim, IDW_HSW_HW_SIM_FAIL_GTT_READ))
+        return -EIO;
+    *value = sim->gtt[offset / 4u];
+    ++sim->stats.gtt_reads;
+    return 0;
+}
+
+static int sim_gtt_write32(void *context, uint64_t offset, uint32_t value)
+{
+    struct idw_hsw_hw_sim *sim = context;
+
+    if ((offset & 3u) || offset > sim->ggtt_bytes - 4u)
+        return -EINVAL;
+    if (sim_fail(sim, IDW_HSW_HW_SIM_FAIL_GTT_WRITE))
+        return -EIO;
+    sim->gtt[offset / 4u] = value;
+    ++sim->stats.gtt_writes;
+    return 0;
+}
+
+static int sim_gtt_flush(void *context)
+{
+    struct idw_hsw_hw_sim *sim = context;
+
+    if (sim_fail(sim, IDW_HSW_HW_SIM_FAIL_FLUSH))
+        return -EIO;
+    ++sim->stats.flushes;
+    return 0;
+}
+
+static int sim_invalidate_tlb(void *context, uint32_t engine_mask)
+{
+    struct idw_hsw_hw_sim *sim = context;
+
+    if (!engine_mask_valid(engine_mask))
+        return -EINVAL;
+    if (sim_fail(sim, IDW_HSW_HW_SIM_FAIL_INVALIDATE))
+        return -EIO;
+    ++sim->stats.invalidations;
+    return 0;
+}
+
+static int sim_set_engine_ppgtt(void *context, uint32_t engine, bool enable)
+{
+    struct idw_hsw_hw_sim *sim = context;
+
+    if (!engine || (engine & (engine - 1)) ||
+        (engine & ~IDW_HSW_ENGINE_ALL))
+        return -EINVAL;
+    if (sim_fail(sim, IDW_HSW_HW_SIM_FAIL_ENGINE))
+        return -EIO;
+    if (enable)
+        sim->engines |= engine;
+    else
+        sim->engines &= ~engine;
+    ++sim->stats.engine_changes;
+    return 0;
+}
+
+static int sim_posting_read(void *context, uint32_t offset, uint32_t *value)
+{
+    struct idw_hsw_hw_sim *sim = context;
+
+    if (!value || (offset & 3u) || offset > IDW_HSW_SIM_REG_BYTES - 4u)
+        return -EINVAL;
+    if (sim_fail(sim, IDW_HSW_HW_SIM_FAIL_POSTING_READ))
+        return -EIO;
+    *value = sim->registers[offset / 4u];
+    ++sim->stats.posting_reads;
+    return 0;
+}
+
+static void sim_release(void *context)
+{
+    struct idw_hsw_hw_sim *sim = context;
+
+    if (!sim)
+        return;
+    free(sim->registers);
+    free(sim->gtt);
+    free(sim);
+}
+
+static const struct idw_hsw_hw_ops sim_ops = {
+    .size = sizeof(sim_ops),
+    .version = IDW_HSW_HW_VERSION,
+    .read32 = sim_read32,
+    .write32 = sim_write32,
+    .gtt_read32 = sim_gtt_read32,
+    .gtt_write32 = sim_gtt_write32,
+    .gtt_flush = sim_gtt_flush,
+    .invalidate_tlb = sim_invalidate_tlb,
+    .set_engine_ppgtt = sim_set_engine_ppgtt,
+    .posting_read = sim_posting_read,
+    .release = sim_release
+};
+
+int idw_hsw_hw_sim_create(struct idw_hsw_hw **hw, uint64_t ggtt_bytes,
+                          const struct idw_device_scope *scope)
+{
+    struct idw_hsw_hw_sim *sim;
+    struct idw_hsw_hw_config config;
+    int ret;
+
+    if (!hw)
+        return -EINVAL;
+    *hw = NULL;
+    if (!scope || !ggtt_bytes ||
+        ggtt_bytes > IDW_HSW_SIM_MAX_GGTT_BYTES ||
+        (ggtt_bytes & (IDW_HSW_GGTT_MIN_ALIGN - 1)))
+        return -EINVAL;
+    sim = calloc(1, sizeof(*sim));
+    if (!sim)
+        return -ENOMEM;
+    sim->registers = calloc(IDW_HSW_SIM_REG_WORDS,
+                            sizeof(sim->registers[0]));
+    sim->gtt = calloc((size_t)(ggtt_bytes / 4u), sizeof(sim->gtt[0]));
+    if (!sim->registers || !sim->gtt) {
+        sim_release(sim);
+        return -ENOMEM;
+    }
+    sim->ggtt_bytes = ggtt_bytes;
+    memset(&config, 0, sizeof(config));
+    config.size = sizeof(config);
+    config.version = IDW_HSW_HW_VERSION;
+    config.flags = IDW_HSW_HW_SIMULATED;
+    config.ggtt_bytes = ggtt_bytes;
+    config.scope = *scope;
+    ret = idw_hsw_hw_init(&config, &sim_ops, sim, hw);
+    if (ret)
+        sim_release(sim);
+    return ret;
+}
+
+static struct idw_hsw_hw_sim *sim_from_hw(struct idw_hsw_hw *hw)
+{
+    if (!hw || !(hw->flags & IDW_HSW_HW_SIMULATED) || !hw->context)
+        return NULL;
+    return hw->context;
+}
+
+int idw_hsw_hw_sim_set_fail_mask(struct idw_hsw_hw *hw, uint32_t mask)
+{
+    struct idw_hsw_hw_sim *sim = sim_from_hw(hw);
+
+    if (!sim || (mask & ~0xffu))
+        return -EINVAL;
+    sim->fail_mask = mask;
+    return 0;
+}
+
+int idw_hsw_hw_sim_fail_next(struct idw_hsw_hw *hw, uint32_t mask)
+{
+    struct idw_hsw_hw_sim *sim = sim_from_hw(hw);
+
+    if (!sim || !mask || (mask & ~0xffu))
+        return -EINVAL;
+    sim->fail_once |= mask;
+    return 0;
+}
+
+int idw_hsw_hw_sim_get_stats(const struct idw_hsw_hw *hw,
+                             struct idw_hsw_hw_sim_stats *stats)
+{
+    struct idw_hsw_hw_sim *sim;
+
+    if (!hw || !stats || !(hw->flags & IDW_HSW_HW_SIMULATED))
+        return -EINVAL;
+    sim = hw->context;
+    if (!sim)
+        return -EINVAL;
+    *stats = sim->stats;
+    return 0;
+}
+
+int idw_hsw_hw_sim_read_reg(const struct idw_hsw_hw *hw, uint32_t offset,
+                            uint32_t *value)
+{
+    struct idw_hsw_hw_sim *sim;
+
+    if (!hw || !value || (offset & 3u) ||
+        offset > IDW_HSW_SIM_REG_BYTES - 4u ||
+        !(hw->flags & IDW_HSW_HW_SIMULATED))
+        return -EINVAL;
+    sim = hw->context;
+    if (!sim)
+        return -EINVAL;
+    *value = sim->registers[offset / 4u];
+    return 0;
+}
+
+int idw_hsw_hw_sim_read_gtt(const struct idw_hsw_hw *hw, uint64_t offset,
+                            uint32_t *value)
+{
+    struct idw_hsw_hw_sim *sim;
+
+    if (!hw || !value || (offset & 3u) ||
+        !(hw->flags & IDW_HSW_HW_SIMULATED))
+        return -EINVAL;
+    sim = hw->context;
+    if (!sim || offset > sim->ggtt_bytes - 4u)
+        return -EINVAL;
+    *value = sim->gtt[offset / 4u];
+    return 0;
+}
+
+uint32_t idw_hsw_hw_sim_engine_mask(const struct idw_hsw_hw *hw)
+{
+    struct idw_hsw_hw_sim *sim;
+
+    if (!hw || !(hw->flags & IDW_HSW_HW_SIMULATED))
+        return 0;
+    sim = hw->context;
+    return sim ? sim->engines : 0;
+}

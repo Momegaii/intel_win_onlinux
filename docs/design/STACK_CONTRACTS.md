@@ -122,6 +122,17 @@ addresses; the QEMU EDU probe passed a corrected page-table storage copy check
 through virtual DMA on 2026-11-20. None of these map resources for a device,
 publish hardware page tables, invalidate GPU translations, or activate a VM.
 
+Stage 3A adds the software prerequisites above that boundary:
+`src/ggtt_allocator.c` provides checked GGTT interval allocation with
+residency/pin/binding state; `src/haswell_gtt_hw.c` defines GTTADDR, flush,
+invalidation, and per-engine activation/deactivation sequences with
+saved-register rollback and poison-on-uncertain-state; `src/ggtt_directory.c`
+connects the PPGTT model to a GGTT-backed directory; and
+`src/device_lifecycle.c` provides staged exclusive-ownership, reverse teardown,
+and recovery rules. The tests use a simulated backend. No PCI ownership, BAR
+mapping, real MMIO, physical GGTT allocation, or hardware page walk is claimed.
+See `HASWELL_GEN75_STAGE3A_READINESS.md`.
+
 `include/idw/memory_manager.hpp` and `src/memory_manager.cpp` add a CPU-side
 allocation lifecycle coordinator over a replaceable backend callback table.
 It tracks backing objects, address reservations, backend bindings, invalidation

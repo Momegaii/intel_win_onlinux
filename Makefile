@@ -8,7 +8,7 @@ BUILD := build
 BIN := $(BUILD)/idwctl
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
-.PHONY: all clean test contract-test backend-contract-test i915-resource-test i915-memory-backend-test gpu-submission-test memory-manager-test abi-test ppgtt-model-test pt-dma-adapter-test cli-test gpu-test gpu-resource-test gpu-memory-test gpu-memory-manager-test gpu-resource-write-test qemu-dma-test install-user install-system-helper kernel kernel-clean
+.PHONY: all clean test contract-test backend-contract-test i915-resource-test i915-memory-backend-test gpu-submission-test memory-manager-test abi-test ppgtt-model-test pt-dma-adapter-test ggtt-allocator-test haswell-gtt-hw-test device-lifecycle-test stage3a-test stage3a-sanitize-test cli-test gpu-test gpu-resource-test gpu-memory-test gpu-memory-manager-test gpu-resource-write-test qemu-dma-test install-user install-system-helper kernel kernel-clean
 all: $(BIN)
 $(BUILD)/gpuva_model.o: src/gpuva_model.c include/idw/gpuva_model.h \
 		include/idw/contracts/base.h
@@ -81,9 +81,47 @@ pt-dma-adapter-test:
 		tests/pt-dma-adapter-test.c \
 		-o build/pt-dma-adapter-test
 	./build/pt-dma-adapter-test
+ggtt-allocator-test:
+	@mkdir -p $(BUILD)
+	$(CC) -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+		src/ggtt_allocator.c tests/ggtt-allocator-test.c \
+		-o build/ggtt-allocator-test
+	./build/ggtt-allocator-test
+haswell-gtt-hw-test:
+	@mkdir -p $(BUILD)
+	$(CC) -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+		src/ggtt_allocator.c src/haswell_gtt_hw.c src/ggtt_directory.c \
+		src/page_table_memory.c src/haswell_ppgtt_model.c \
+		tests/haswell-gtt-hw-test.c -o build/haswell-gtt-hw-test
+	./build/haswell-gtt-hw-test
+device-lifecycle-test:
+	@mkdir -p $(BUILD)
+	$(CC) -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+		src/device_lifecycle.c tests/device-lifecycle-test.c \
+		-o build/device-lifecycle-test
+	./build/device-lifecycle-test
+stage3a-test: ggtt-allocator-test haswell-gtt-hw-test device-lifecycle-test
+stage3a-sanitize-test:
+	@mkdir -p $(BUILD)/sanitize
+	$(CC) -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude -O1 -g \
+		-fsanitize=address,undefined -fno-omit-frame-pointer \
+		src/ggtt_allocator.c tests/ggtt-allocator-test.c \
+		-o build/sanitize/ggtt-allocator-test
+	$(CC) -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude -O1 -g \
+		-fsanitize=address,undefined -fno-omit-frame-pointer \
+		src/device_lifecycle.c tests/device-lifecycle-test.c \
+		-o build/sanitize/device-lifecycle-test
+	$(CC) -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude -O1 -g \
+		-fsanitize=address,undefined -fno-omit-frame-pointer \
+		src/ggtt_allocator.c src/haswell_gtt_hw.c src/ggtt_directory.c \
+		src/page_table_memory.c src/haswell_ppgtt_model.c \
+		tests/haswell-gtt-hw-test.c -o build/sanitize/haswell-gtt-hw-test
+	ASAN_OPTIONS=detect_leaks=1 ./build/sanitize/ggtt-allocator-test
+	ASAN_OPTIONS=detect_leaks=1 ./build/sanitize/device-lifecycle-test
+	ASAN_OPTIONS=detect_leaks=1 ./build/sanitize/haswell-gtt-hw-test
 cli-test: all
 	./tests/cli-arguments-smoke.sh
-test: all contract-test backend-contract-test i915-resource-test i915-memory-backend-test gpu-submission-test memory-manager-test abi-test ppgtt-model-test pt-dma-adapter-test cli-test
+test: all contract-test backend-contract-test i915-resource-test i915-memory-backend-test gpu-submission-test memory-manager-test abi-test ppgtt-model-test pt-dma-adapter-test ggtt-allocator-test haswell-gtt-hw-test device-lifecycle-test cli-test
 	./tests/smoke.sh
 	./tests/gem-resource-backend-smoke.sh
 	./tests/kernel-query-smoke.sh
