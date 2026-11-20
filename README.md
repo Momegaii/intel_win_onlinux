@@ -98,8 +98,8 @@ Haswell is Gen 7.5. Do not assume Gen8+ address-space or command-stream features
 | Stage | Milestone | Proof required | Status |
 |---|---|---|---|
 | 1 | GPU resource read/write | GPU writes data into a managed resource; CPU reads back the exact result. | Complete for the i915-assisted path: Haswell `8086:0412` wrote `0x2468ace0` at resource offset 16 and CPU read it back exactly. |
-| 2 | Native DMA | IDW allocates and maps real DMA memory for its exclusively owned PCI device. | In progress: QEMU EDU virtual-device DMA and provider cleanup passed on TCG. Page-table storage and its QEMU copy check are implemented but not yet executed. Physical Haswell DMA remains unproven; i915 remains bound. |
-| 3 | Hardware PPGTT | GPU uses IDW-created Haswell Gen7.5 page tables. | Not implemented; the PPGTT model can use DMA-backed page-table storage, and the QEMU test includes a page-table DMA copy check, but there is no hardware publication, invalidation, or VM activation, and i915 owns hardware mappings. |
+| 2 | Native DMA | IDW allocates and maps real DMA memory for its exclusively owned PCI device. | In progress: QEMU EDU virtual-device DMA, page-table DMA copy, and provider cleanup passed on TCG. Physical Haswell DMA remains unproven; i915 remains bound. See `tests/qemu-dma/evidence-2026-11-20-tcg-page-table.log`. |
+| 3 | Hardware PPGTT | GPU uses IDW-created Haswell Gen7.5 page tables. | Not implemented; the PPGTT model can use DMA-backed page-table storage, and the QEMU test verified a page-table DMA copy, but there is no hardware publication, invalidation, or VM activation, and i915 owns hardware mappings. |
 | 4 | Independent submission | IDW submits and completes commands without i915 graphics execution. | Not implemented; all demonstrated execution is i915-assisted. |
 | 5 | Scheduler | Multiple contexts, queues, timeout and recovery. | Not implemented independently; existing context/fence tests do not establish an IDW scheduler. |
 | 6 | UMD | Real shader compilation and rendering. | Not implemented. |
@@ -140,8 +140,10 @@ The opt-in `make qemu-dma-test` runs a separate QEMU TCG guest using QEMU EDU
 (`1234:11e8`) to exercise the kernel DMA provider with actual virtual
 device-side DMA transactions. The probe also copies a fully populated 4 KiB
 Gen7.5 page table to a second DMA page and verifies the exact layout after
-device DMA. It is not part of `make test` and does not validate Haswell DMA or
-change host i915 ownership. See
+device DMA. That page-table path passed on 2026-11-20 under QEMU 10.0.13 TCG
+with a Debian 6.12.117 guest; the serial log is
+`tests/qemu-dma/evidence-2026-11-20-tcg-page-table.log`. It is not part of
+`make test` and does not validate Haswell DMA or change host i915 ownership. See
 [`tests/qemu-dma/README.md`](tests/qemu-dma/README.md) for run instructions and
 the evidence required for a pass.
 

@@ -111,10 +111,9 @@ tests in `make ppgtt-model-test`. A storage-only adapter
 (`include/idw/pt_dma_adapter.h`, `src/pt_dma_adapter.c`) can supply pages from
 an injectable DMA provider and is bound to the kernel DMA provider by
 `kernel/idw_dma_pt_adapter.c`. Userspace tests still assign synthetic DMA
-addresses; the QEMU EDU probe includes a page-table storage copy check through
-virtual DMA, but that updated probe has not yet been rerun. None of these map
-resources for a device, publish hardware page tables, invalidate GPU
-translations, or activate a VM.
+addresses; the QEMU EDU probe passed a page-table storage copy check through
+virtual DMA on 2026-11-20. None of these map resources for a device, publish
+hardware page tables, invalidate GPU translations, or activate a VM.
 
 `include/idw/memory_manager.hpp` and `src/memory_manager.cpp` add a CPU-side
 allocation lifecycle coordinator over a replaceable backend callback table.
