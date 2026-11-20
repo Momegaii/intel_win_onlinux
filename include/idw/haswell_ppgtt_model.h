@@ -3,6 +3,7 @@
 #define IDW_HASWELL_PPGTT_MODEL_H
 
 #include "contracts/haswell_ppgtt.h"
+#include "haswell_ppgtt_format.h"
 
 #define IDW_HSW_PPGTT_PDES 512u
 #define IDW_HSW_PPGTT_DMA_ADDRESS_BITS 40u
@@ -13,8 +14,8 @@ struct idw_hsw_ppgtt_page_ops {
     uint32_t size;
     uint32_t version;
     struct idw_device_scope scope;
-    int (*alloc_page)(void *context, struct idw_dma_page *page);
-    void (*free_page)(void *context, struct idw_dma_page *page);
+    int (*alloc_page_table_page)(void *context, struct idw_dma_page *page);
+    void (*free_page_table_page)(void *context, struct idw_dma_page *page);
     void *context;
 };
 

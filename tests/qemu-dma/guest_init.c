@@ -104,7 +104,7 @@ int main(void)
 	if (syscall(SYS_delete_module, "idw_edu_dma_test", 0))
 		stop_guest("unload test driver and run PCI remove");
 
-	puts("IDW_QEMU_DMA: PASS: probe, 32 DMA cycles, cleanup and remove completed");
+	puts("IDW_QEMU_DMA: PASS: probe, page-table DMA, 32 DMA cycles, cleanup and remove completed");
 	fflush(stdout);
 	signal_qemu_exit(0x10);
 	return 1;

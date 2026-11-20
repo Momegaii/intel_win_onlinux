@@ -88,3 +88,21 @@ No actual IDW-owned DMA allocation or map was exercised; IDW has no PCI binding
 and Haswell remains bound to i915. Stage 2 is in progress, not complete;
 Stages 3–8 remain unproven/not implemented, and no ownership transition was
 attempted.
+
+2026-11-20 DMA-backed page-table storage adapter: added a storage-only adapter
+(`include/idw/pt_dma_adapter.h`, `src/pt_dma_adapter.c`) and kernel binding
+(`kernel/idw_dma_pt_adapter.c`) that supply validated DMA pages to the Haswell
+Gen7.5 PPGTT software model. The adapter checks zeroed 4 KiB coherent/streaming
+pages, 40-bit DMA range/alignment, device/generation scope, allocation cookies,
+synchronization bounds, and explicit page release before teardown. It advertises
+`IDW_PT_BACKEND_PAGE_TABLE_ONLY`; the complete native contract rejects that
+partial profile. `make pt-dma-adapter-test` covers validation, rollback, sync,
+cleanup, and PPGTT integration with a simulated provider. The QEMU EDU probe now
+includes a check that copies a populated page table to a second DMA page and
+verifies exact layout after virtual device DMA. `make contract-test abi-test
+backend-contract-test ppgtt-model-test pt-dma-adapter-test memory-manager-test
+gpu-submission-test` passed, and `make kernel CC=gcc` built all three modules.
+The QEMU guest run was not executed here. This is software page-table storage
+plus prior virtual-DMA evidence only: no
+hardware page-table publication, GPU invalidation, VM activation, resource
+mapping, MMIO, physical Haswell DMA, or independent GPU ownership is claimed.

@@ -80,11 +80,6 @@ static void fake_free_page(void *context, struct idw_dma_page *page)
     }
 }
 
-static uint32_t encode_gen67_address(uint64_t address)
-{
-    return (uint32_t)address | (uint32_t)((address >> 28) & 0xff0u);
-}
-
 static int test_gpuva_space(void)
 {
     struct idw_gpuva_space space;
@@ -121,8 +116,8 @@ static int test_geometry_and_lifecycle(void)
     struct idw_hsw_ppgtt_page_ops ops = {
         .size = sizeof(ops),
         .version = 1,
-        .alloc_page = fake_alloc_page,
-        .free_page = fake_free_page,
+        .alloc_page_table_page = fake_alloc_page,
+        .free_page_table_page = fake_free_page,
         .context = &allocator
     };
     struct idw_hsw_ppgtt_model *model = NULL;
@@ -138,14 +133,14 @@ static int test_geometry_and_lifecycle(void)
     };
 
     ops.scope = (struct idw_device_scope) TEST_DEVICE_SCOPE;
-    CHECK(encode_gen67_address(dma_pages[0].dma_address) == 0x34567120u);
-    CHECK(encode_gen67_address(dma_pages[1].dma_address) == 0x45678230u);
+    CHECK(idw_hsw_ppgtt_encode_address(dma_pages[0].dma_address) == 0x34567120u);
+    CHECK(idw_hsw_ppgtt_encode_address(dma_pages[1].dma_address) == 0x45678230u);
     CHECK(idw_hsw_ppgtt_model_create(&ops, &model) == 0);
     CHECK(idw_hsw_ppgtt_map(model, va, 8192, dma_pages, 2) == 0);
     CHECK(idw_hsw_ppgtt_pde(model, 0) ==
-          encode_gen67_address(0x00800000) + 1);
+          idw_hsw_ppgtt_encode_address(0x00800000) + 1);
     CHECK(idw_hsw_ppgtt_pde(model, 1) ==
-          encode_gen67_address(0x00801000) + 1);
+          idw_hsw_ppgtt_encode_address(0x00801000) + 1);
     CHECK(idw_hsw_ppgtt_translate(model, va, &translation) == 0);
     CHECK(translation.pde_index == 0);
     CHECK(translation.pte_index == 1023);
@@ -197,8 +192,8 @@ static int test_invalid_maps_and_rollback(void)
         .size = sizeof(ops),
         .version = 1,
         .scope = TEST_DEVICE_SCOPE,
-        .alloc_page = fake_alloc_page,
-        .free_page = fake_free_page,
+        .alloc_page_table_page = fake_alloc_page,
+        .free_page_table_page = fake_free_page,
         .context = &allocator
     };
     struct idw_hsw_ppgtt_model *model = NULL;
@@ -274,8 +269,8 @@ static int test_failed_invalidation_poison(void)
         .size = sizeof(ops),
         .version = 1,
         .scope = TEST_DEVICE_SCOPE,
-        .alloc_page = fake_alloc_page,
-        .free_page = fake_free_page,
+        .alloc_page_table_page = fake_alloc_page,
+        .free_page_table_page = fake_free_page,
         .context = &allocator
     };
     struct idw_hsw_ppgtt_model *model = NULL;
@@ -312,8 +307,8 @@ static int test_invalidation_generation_coalescing(void)
         .size = sizeof(ops),
         .version = 1,
         .scope = TEST_DEVICE_SCOPE,
-        .alloc_page = fake_alloc_page,
-        .free_page = fake_free_page,
+        .alloc_page_table_page = fake_alloc_page,
+        .free_page_table_page = fake_free_page,
         .context = &allocator
     };
     struct idw_hsw_ppgtt_model *model = NULL;

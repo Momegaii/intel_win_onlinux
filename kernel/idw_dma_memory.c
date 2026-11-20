@@ -55,7 +55,7 @@ EXPORT_SYMBOL_GPL(idw_dma_provider_init);
 
 int idw_dma_provider_fini(struct idw_dma_provider *provider)
 {
-	struct idw_dma_page *page, *next;
+	struct idw_dma_provider_page *page, *next;
 	struct device *dev;
 
 	if (!provider)
@@ -86,7 +86,7 @@ EXPORT_SYMBOL_GPL(idw_dma_provider_fini);
 int idw_dma_page_alloc(struct idw_dma_provider *provider,
 		       struct idw_dma_page_info *info)
 {
-	struct idw_dma_page *page;
+	struct idw_dma_provider_page *page;
 	void *cpu_address;
 	dma_addr_t dma_address;
 	int ret = 0;
@@ -147,7 +147,7 @@ EXPORT_SYMBOL_GPL(idw_dma_page_alloc);
 int idw_dma_page_free(struct idw_dma_provider *provider,
 		      const struct idw_dma_page_info *info)
 {
-	struct idw_dma_page *page;
+	struct idw_dma_provider_page *page;
 	int ret = -ENOENT;
 
 	if (!provider || !info)

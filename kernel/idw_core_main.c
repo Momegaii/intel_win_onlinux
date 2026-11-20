@@ -15,6 +15,7 @@
 #include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/version.h>
 #include <linux/vmalloc.h>
 #include "../include/uapi/idw_ioctl.h"
 #include "idw_miniport.h"
@@ -458,7 +459,11 @@ static void __exit idw_exit(void)
 module_init(idw_init);
 module_exit(idw_exit);
 MODULE_LICENSE("GPL");
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
 MODULE_IMPORT_NS("DMA_BUF");
+#else
+MODULE_IMPORT_NS(DMA_BUF);
+#endif
 MODULE_AUTHOR("IDW Project");
 MODULE_DESCRIPTION("IDW resource manager and native miniport callback dispatcher");
 MODULE_VERSION("1.0.0");

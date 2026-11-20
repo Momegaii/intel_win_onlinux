@@ -4,6 +4,7 @@
  * This driver is intended only for the isolated QEMU guest test harness.
  */
 #include <linux/dma-mapping.h>
+#include <linux/errno.h>
 #include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/pci.h>
@@ -11,6 +12,8 @@
 #include <linux/string.h>
 #include <asm/io.h>
 #include "../include/idw/dma_memory.h"
+#include "../include/idw/haswell_ppgtt_model.h"
+#include "idw_dma_pt_adapter.h"
 
 #define IDW_EDU_VENDOR_ID 0x1234
 #define IDW_EDU_DEVICE_ID 0x11e8
@@ -30,7 +33,9 @@ struct idw_edu_test {
 	void __iomem *bar;
 	struct idw_dma_provider provider;
 	struct idw_dma_page_info teardown_page;
+	struct idw_dma_pt_adapter pt_adapter;
 	bool provider_ready;
+	bool pt_adapter_ready;
 };
 
 static int idw_edu_test_result = -EINPROGRESS;
@@ -201,6 +206,188 @@ out:
 	return ret;
 }
 
+static int idw_edu_test_pt_bad_descriptors(
+	struct idw_edu_test *test, const struct idw_dma_page *table,
+	const struct idw_pt_memory_ops *memory)
+{
+	struct idw_dma_page bad;
+	void *context = idw_dma_pt_adapter_memory_context(&test->pt_adapter);
+	int ret;
+
+	bad = *table;
+	bad.dma_address = 1ULL << 40;
+	ret = idw_dma_pt_adapter_validate_page(&test->pt_adapter, &bad);
+	if (ret != -ERANGE)
+		return -EINVAL;
+
+	bad = *table;
+	bad.dma_address += 1;
+	ret = idw_dma_pt_adapter_validate_page(&test->pt_adapter, &bad);
+	if (ret != -EINVAL)
+		return -EINVAL;
+
+	bad = *table;
+	bad.scope.generation++;
+	ret = idw_dma_pt_adapter_validate_page(&test->pt_adapter, &bad);
+	if (ret != -EXDEV)
+		return -EINVAL;
+
+	bad = *table;
+	bad.scope.device_cookie++;
+	ret = idw_dma_pt_adapter_validate_page(&test->pt_adapter, &bad);
+	if (ret != -EXDEV)
+		return -EINVAL;
+
+	bad = *table;
+	bad.bytes = 0;
+	ret = idw_dma_pt_adapter_validate_page(&test->pt_adapter, &bad);
+	if (ret != -EINVAL)
+		return -EINVAL;
+
+	bad = *table;
+	bad.allocation_cookie = 0;
+	ret = idw_dma_pt_adapter_validate_page(&test->pt_adapter, &bad);
+	if (ret != -EINVAL)
+		return -EINVAL;
+
+	bad = *table;
+	bad.memory_type = 0;
+	ret = idw_dma_pt_adapter_validate_page(&test->pt_adapter, &bad);
+	if (ret != -EINVAL)
+		return -EINVAL;
+
+	ret = memory->sync_page_table_for_device(context, table,
+						 IDW_PT_PAGE_BYTES, 1);
+	if (ret != -EINVAL)
+		return -EINVAL;
+	ret = memory->map_allocation(context, 1, 0, IDW_PT_PAGE_BYTES,
+				     NULL, 0, NULL);
+	if (ret != -EOPNOTSUPP)
+		return -EINVAL;
+	memory->unmap_allocation(context, 1, NULL, 0);
+
+	pr_info("IDW_QEMU_DMA: page-table malformed descriptors and unsupported mapping rejected\n");
+	return 0;
+}
+
+static int idw_edu_test_pt_storage(struct idw_edu_test *test)
+{
+	struct idw_dma_page table = {};
+	struct idw_dma_page destination = {};
+	struct idw_pt_memory_ops memory;
+	struct idw_hsw_ppgtt_page_ops page_ops;
+	struct idw_pt_backend_desc backend;
+	u32 *ptes;
+	u32 first;
+	u32 last;
+	unsigned int i;
+	int ret;
+
+	ret = idw_dma_pt_adapter_init(&test->pt_adapter, &test->provider);
+	if (ret)
+		return ret;
+	test->pt_adapter_ready = true;
+
+	ret = idw_dma_pt_adapter_backend(&test->pt_adapter, &backend);
+	if (ret)
+		return ret;
+	ret = idw_pt_backend_validate(&backend,
+				      IDW_PT_CAP_DMA_PAGE_TABLE |
+				      IDW_PT_CAP_SYNC_FOR_DEVICE);
+	if (ret)
+		return ret;
+	if (backend.kind != IDW_PT_BACKEND_NATIVE_DMA ||
+	    !(backend.flags & IDW_PT_BACKEND_PAGE_TABLE_ONLY) ||
+	    (backend.capabilities & IDW_PT_CAP_DMA_RESOURCE_MAPPING))
+		return -EINVAL;
+
+	ret = idw_dma_pt_adapter_page_ops(&test->pt_adapter, &page_ops);
+	if (ret)
+		return ret;
+	table.size = sizeof(table);
+	ret = page_ops.alloc_page_table_page(page_ops.context, &table);
+	if (ret)
+		return ret;
+
+	ptes = table.cpu_address;
+	for (i = 0; i < IDW_HASWELL_PPGTT_PTES_PER_TABLE; i++) {
+		u64 dma = 0xab00000000ULL +
+			  (u64)i * IDW_HASWELL_PPGTT_PAGE_SIZE;
+
+		ptes[i] = idw_hsw_ppgtt_encode_address(dma) | 1u;
+	}
+	first = ptes[0];
+	last = ptes[IDW_HASWELL_PPGTT_PTES_PER_TABLE - 1];
+
+	idw_dma_pt_adapter_memory_ops(&test->pt_adapter, &memory);
+	ret = memory.sync_page_table_for_device(
+		idw_dma_pt_adapter_memory_context(&test->pt_adapter),
+		&table, 0, IDW_PT_PAGE_BYTES);
+	if (ret)
+		goto free_table;
+
+	destination.size = sizeof(destination);
+	ret = page_ops.alloc_page_table_page(page_ops.context, &destination);
+	if (ret)
+		goto free_table;
+
+	ret = idw_edu_dma_transfer(test, table.dma_address,
+				   IDW_EDU_DMA_BUFFER, IDW_PT_PAGE_BYTES, 0);
+	if (ret)
+		goto free_destination;
+	ret = idw_edu_dma_transfer(test, IDW_EDU_DMA_BUFFER,
+				   destination.dma_address, IDW_PT_PAGE_BYTES,
+				   IDW_EDU_DMA_TO_PCI);
+	if (ret)
+		goto free_destination;
+	ret = idw_dma_pt_adapter_sync_for_cpu(&test->pt_adapter,
+					      &destination, 0,
+					      IDW_PT_PAGE_BYTES);
+	if (ret)
+		goto free_destination;
+	if (memcmp(table.cpu_address, destination.cpu_address,
+		   IDW_PT_PAGE_BYTES)) {
+		ret = -EIO;
+		goto free_destination;
+	}
+	if (((u32 *)destination.cpu_address)[0] != first ||
+	    ((u32 *)destination.cpu_address)
+		[IDW_HASWELL_PPGTT_PTES_PER_TABLE - 1] != last) {
+		ret = -EIO;
+		goto free_destination;
+	}
+	pr_info("IDW_QEMU_DMA: page-table DMA layout verified bytes=%u first=%08x last=%08x\n",
+		IDW_PT_PAGE_BYTES, first, last);
+
+	ret = idw_edu_test_pt_bad_descriptors(test, &table, &memory);
+	if (ret)
+		goto free_destination;
+
+	ret = idw_dma_pt_adapter_release_page(&test->pt_adapter, &destination);
+	if (ret)
+		goto free_destination;
+	memset(&destination, 0, sizeof(destination));
+	ret = idw_dma_pt_adapter_release_page(&test->pt_adapter, &table);
+	if (ret)
+		return ret;
+	memset(&table, 0, sizeof(table));
+	if (idw_dma_pt_adapter_outstanding(&test->pt_adapter))
+		return -EBUSY;
+	pr_info("IDW_QEMU_DMA: page-table adapter cleanup verified\n");
+	return 0;
+
+free_destination:
+	if (destination.cpu_address)
+		(void)idw_dma_pt_adapter_release_page(&test->pt_adapter,
+						      &destination);
+free_table:
+	if (table.cpu_address)
+		(void)idw_dma_pt_adapter_release_page(&test->pt_adapter,
+						      &table);
+	return ret;
+}
+
+
 static int idw_edu_probe(struct pci_dev *pdev,
 			 const struct pci_device_id *id)
 {
@@ -254,6 +441,10 @@ static int idw_edu_probe(struct pci_dev *pdev,
 		goto fail_master;
 	test->provider_ready = true;
 
+	ret = idw_edu_test_pt_storage(test);
+	if (ret)
+		goto fail_provider;
+
 	ret = idw_edu_test_dma_cycles(test);
 	if (ret)
 		goto fail_provider;
@@ -272,6 +463,14 @@ static int idw_edu_probe(struct pci_dev *pdev,
 	return 0;
 
 fail_provider:
+	if (test->pt_adapter_ready) {
+		int adapter_ret = idw_dma_pt_adapter_fini(&test->pt_adapter);
+
+		if (adapter_ret)
+			pr_warn("IDW_QEMU_DMA: page-table adapter cleanup returned %d\n",
+				adapter_ret);
+		test->pt_adapter_ready = false;
+	}
 	if (test->provider_ready) {
 		idw_dma_provider_fini(&test->provider);
 		test->provider_ready = false;
@@ -297,10 +496,15 @@ static void idw_edu_remove(struct pci_dev *pdev)
 {
 	struct idw_edu_test *test = pci_get_drvdata(pdev);
 	bool outstanding;
+	int adapter_ret = 0;
 	int ret;
 
 	if (!test)
 		return;
+	if (test->pt_adapter_ready) {
+		adapter_ret = idw_dma_pt_adapter_fini(&test->pt_adapter);
+		test->pt_adapter_ready = false;
+	}
 	outstanding = !list_empty(&test->provider.pages);
 	ret = idw_dma_provider_fini(&test->provider);
 	test->provider_ready = false;
@@ -310,7 +514,11 @@ static void idw_edu_remove(struct pci_dev *pdev)
 	pci_disable_device(pdev);
 	pci_set_drvdata(pdev, NULL);
 	kfree(test);
-	idw_edu_remove_result = outstanding && !ret ? 0 : (ret ? ret : -EINVAL);
+	if (adapter_ret)
+		idw_edu_remove_result = adapter_ret;
+	else
+		idw_edu_remove_result =
+			outstanding && !ret ? 0 : (ret ? ret : -EINVAL);
 	pr_info("IDW_QEMU_DMA: remove freed outstanding provider pages=%s result=%d\n",
 		outstanding ? "yes" : "no", idw_edu_remove_result);
 }

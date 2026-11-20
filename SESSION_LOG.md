@@ -633,3 +633,44 @@ Stage 2's QEMU validation gate passed, while physical native DMA remains
 unproven and the overall native-DMA stage remains in progress. The host GPU
 `8086:0412` remained bound to i915 throughout; no host PCI binding or ownership
 was changed.
+
+### DMA-backed page-table storage continuation
+
+Added a storage-only page-table memory adapter between the Haswell Gen7.5 PPGTT
+software model and a DMA page provider. `include/idw/pt_dma_adapter.h` and
+`src/pt_dma_adapter.c` validate zeroed, page-aligned coherent or streaming
+pages, 40-bit DMA range, device/generation scope, allocation cookies,
+synchronization bounds, and explicit release before teardown. The adapter
+advertises `IDW_PT_BACKEND_PAGE_TABLE_ONLY`; the complete native-DMA contract
+rejects that partial profile. `kernel/idw_dma_pt_adapter.c` binds it to the
+existing ownership-checked kernel provider, and `kernel/pt_dma_adapter_shared.c`
+plus `kernel/page_table_memory_shared.c` compile the portable code with kernel
+headers.
+
+The QEMU EDU test module is now a composite (`idw_edu_dma_test_main.c`,
+`idw_dma_pt_adapter.c`, and the two shared units). Its probe allocates page-table
+pages through the adapter, fills a Gen7.5 page table, synchronizes it for the
+device, copies it to a second DMA page with EDU, synchronizes for the CPU, and
+verifies the exact bytes and first/last PTE layout. It also rejects malformed
+page descriptors and unsupported resource mapping, then releases every page and
+checks the adapter is no longer busy before the existing 32-cycle DMA test.
+
+Added `make pt-dma-adapter-test` with a simulated provider. It covers adapter
+validation, allocation-failure rollback, provider-reported scope/range/
+alignment/cookie/type/size errors, synchronization, release, teardown, backend
+capability rejection, and PPGTT model integration including deferred table
+reclamation. The contract test now also rejects a page whose 40-bit DMA range
+overflows or whose length is not page-aligned.
+
+Validation in this continuation: `make contract-test abi-test
+backend-contract-test ppgtt-model-test pt-dma-adapter-test
+memory-manager-test gpu-submission-test` passed; ASan/UBSan passed for the
+adapter, PPGTT model, and page-table contract tests; `make kernel CC=gcc` and
+`make kernel CC=gcc W=1` built all three modules. The full `make test` compiled
+all userspace targets after installing Debian `libdrm-dev` and `pkg-config`, but
+its final `tests/smoke.sh` step failed because this container has no Intel DRM
+render node. The QEMU guest test itself was not executed in this continuation,
+so the preserved TCG log remains the virtual-DMA evidence and does not cover
+page-table storage. No hardware page-table publication, GPU invalidation, VM
+activation, resource mapping, MMIO, physical Haswell DMA, or independent GPU
+ownership is claimed.

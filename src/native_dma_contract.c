@@ -18,12 +18,16 @@ int idw_native_dma_contract_validate(
         contract->version != IDW_NATIVE_DMA_CONTRACT_VERSION ||
         contract->dma_address_bits != 40 || contract->flags)
         return -EINVAL;
-    ret = idw_pt_backend_validate(&contract->backend, required_caps);
+    ret = idw_pt_backend_validate(&contract->backend, 0);
     if (ret)
         return ret;
     if (contract->backend.kind != IDW_PT_BACKEND_NATIVE_DMA ||
-        !(contract->backend.flags & IDW_PT_BACKEND_EXCLUSIVE_DEVICE_OWNER))
+        !(contract->backend.flags & IDW_PT_BACKEND_EXCLUSIVE_DEVICE_OWNER) ||
+        (contract->backend.flags & IDW_PT_BACKEND_PAGE_TABLE_ONLY))
         return -EPERM;
+    ret = idw_pt_backend_validate(&contract->backend, required_caps);
+    if (ret)
+        return ret;
     if (contract->memory.size != sizeof(contract->memory) ||
         contract->memory.version != IDW_PT_MEMORY_VERSION ||
         !contract->memory.alloc_page_table_page ||

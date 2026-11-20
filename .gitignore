@@ -3,6 +3,7 @@ build/
 *.ko
 *.mod
 *.mod.c
+*.d
 Module.symvers
 modules.order
 .*.cmd

@@ -101,14 +101,20 @@ backends: i915 exposes only its supported DRM/GEM validation path, while native
 DMA requires exclusive ownership and device-scoped mappings. The generic
 capability/scope validators and i915 profile are implemented and covered by
 `make backend-contract-test`; native contract validation is structural only.
-Native DMA operations themselves are not implemented. Headers are
-compile-checked by `make contract-test`.
+Page-table storage operations are implemented over a kernel DMA provider, but
+resource mapping, invalidation, activation, and hardware PPGTT remain
+unimplemented. Headers are compile-checked by `make contract-test`.
 
 The separate CPU-only GPU-VA interval allocator and Haswell Gen7.5 PPGTT model
 are implemented in `src/gpuva_model.c` and `src/haswell_ppgtt_model.c`, with
-tests in `make ppgtt-model-test`. They validate software structures using
-synthetic DMA addresses; they do not map pages for a device or program/invalidate
-GPU page tables.
+tests in `make ppgtt-model-test`. A storage-only adapter
+(`include/idw/pt_dma_adapter.h`, `src/pt_dma_adapter.c`) can supply pages from
+an injectable DMA provider and is bound to the kernel DMA provider by
+`kernel/idw_dma_pt_adapter.c`. Userspace tests still assign synthetic DMA
+addresses; the QEMU EDU probe includes a page-table storage copy check through
+virtual DMA, but that updated probe has not yet been rerun. None of these map
+resources for a device, publish hardware page tables, invalidate GPU
+translations, or activate a VM.
 
 `include/idw/memory_manager.hpp` and `src/memory_manager.cpp` add a CPU-side
 allocation lifecycle coordinator over a replaceable backend callback table.

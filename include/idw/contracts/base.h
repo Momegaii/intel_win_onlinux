@@ -3,8 +3,13 @@
 #define IDW_CONTRACT_BASE_H
 
 /* Internal IDW subsystem contracts. Not a Windows ABI or stable UAPI yet. */
+#ifdef __KERNEL__
+#include <linux/types.h>
+#include <linux/stddef.h>
+#else
 #include <stdint.h>
 #include <stddef.h>
+#endif
 
 #define IDW_CONTRACT_VERSION_MAJOR 1u
 #define IDW_CONTRACT_VERSION_MINOR 0u

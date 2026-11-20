@@ -105,8 +105,9 @@ set -e
 printf 'QEMU exit status: %d\n' "$QEMU_STATUS" | tee -a "$LOG"
 
 if [[ $QEMU_STATUS -eq 33 ]] &&
-   grep -q 'IDW_QEMU_DMA: PASS: probe, 32 DMA cycles, cleanup and remove completed' "$LOG"; then
-    printf 'PASS: QEMU EDU performed device-side DMA read/write and provider removal cleanup.\n'
+   grep -q 'IDW_QEMU_DMA: page-table DMA layout verified' "$LOG" &&
+   grep -q 'IDW_QEMU_DMA: PASS: probe, page-table DMA, 32 DMA cycles, cleanup and remove completed' "$LOG"; then
+    printf 'PASS: QEMU EDU performed device-side DMA read/write, page-table DMA visibility, and provider removal cleanup.\n'
     exit 0
 fi
 

@@ -112,6 +112,59 @@ static int test_i915_boundary(void)
     return 0;
 }
 
+static int test_page_table_only_profile(void)
+{
+    struct idw_pt_backend_desc backend = {
+        .size = sizeof(backend),
+        .version = IDW_PT_MEMORY_VERSION,
+        .kind = IDW_PT_BACKEND_NATIVE_DMA,
+        .flags = IDW_PT_BACKEND_EXCLUSIVE_DEVICE_OWNER |
+                 IDW_PT_BACKEND_PAGE_TABLE_ONLY,
+        .capabilities = IDW_PT_CAP_DMA_PAGE_TABLE |
+                        IDW_PT_CAP_SYNC_FOR_DEVICE,
+        .scope = { .device_cookie = 0x55, .generation = 7 }
+    };
+    struct idw_dma_page page = {
+        .size = sizeof(page),
+        .memory_type = IDW_PT_PAGE_COHERENT,
+        .dma_address = 0x400000,
+        .bytes = IDW_PT_PAGE_BYTES,
+        .scope = { .device_cookie = 0x55, .generation = 7 },
+        .allocation_cookie = 0x66
+    };
+    struct idw_dma_page_mapping mapping = {
+        .dma_address = 0x400000,
+        .bytes = IDW_PT_PAGE_BYTES,
+        .scope = { .device_cookie = 0x55, .generation = 7 },
+        .mapping_cookie = 0x67
+    };
+
+    CHECK(idw_pt_backend_validate(&backend, IDW_PT_CAP_DMA_PAGE_TABLE |
+                                            IDW_PT_CAP_SYNC_FOR_DEVICE) == 0);
+    CHECK(idw_pt_backend_validate(&backend, IDW_PT_CAP_DMA_RESOURCE_MAPPING) ==
+          -EOPNOTSUPP);
+    CHECK(idw_pt_mapping_validate(&backend, &mapping) == -EOPNOTSUPP);
+
+    page.cpu_address = aligned_alloc(IDW_PT_PAGE_BYTES, IDW_PT_PAGE_BYTES);
+    CHECK(page.cpu_address != NULL);
+    CHECK(idw_pt_page_validate(&backend, &page) == 0);
+    free(page.cpu_address);
+
+    backend.capabilities |= IDW_PT_CAP_DMA_RESOURCE_MAPPING;
+    CHECK(idw_pt_backend_validate(&backend, 0) == -EPERM);
+    backend.capabilities = IDW_PT_CAP_DMA_PAGE_TABLE;
+    CHECK(idw_pt_backend_validate(&backend, 0) == -EINVAL);
+    backend.capabilities = IDW_PT_CAP_DMA_PAGE_TABLE |
+                           IDW_PT_CAP_SYNC_FOR_DEVICE |
+                           IDW_PT_CAP_GEN75_INVALIDATE;
+    CHECK(idw_pt_backend_validate(&backend, 0) == -EPERM);
+    backend.capabilities = IDW_PT_CAP_DMA_PAGE_TABLE |
+                           IDW_PT_CAP_SYNC_FOR_DEVICE;
+    backend.flags = IDW_PT_BACKEND_EXCLUSIVE_DEVICE_OWNER;
+    CHECK(idw_pt_backend_validate(&backend, 0) == -EINVAL);
+    return 0;
+}
+
 static int test_native_scope_and_contract(void)
 {
     const struct idw_device_scope scope = {
@@ -208,14 +261,20 @@ static int test_page_validation(void)
     page.scope = backend.scope;
     page.dma_address = 1ULL << 40;
     CHECK(idw_pt_page_validate(&backend, &page) == -EINVAL);
+    page.dma_address = (1ULL << 40) - IDW_PT_PAGE_BYTES;
+    page.bytes = IDW_PT_PAGE_BYTES * 2;
+    CHECK(idw_pt_page_validate(&backend, &page) == -EINVAL);
+    page.dma_address = 0x200000;
+    page.bytes = IDW_PT_PAGE_BYTES + 1;
+    CHECK(idw_pt_page_validate(&backend, &page) == -EINVAL);
     free(page.cpu_address);
     return 0;
 }
 
 int main(void)
 {
-    if (test_i915_boundary() || test_native_scope_and_contract() ||
-        test_page_validation())
+    if (test_i915_boundary() || test_page_table_only_profile() ||
+        test_native_scope_and_contract() || test_page_validation())
         return 1;
     puts("PASS: page-table backend capability and device-scope contract tests");
     puts("NOTE: synthetic descriptors validate contracts only; no DMA or GPU operation occurred.");

@@ -12,7 +12,7 @@
 #define IDW_DMA_ADDRESS_BITS 40
 #define IDW_DMA_ADDRESS_MASK DMA_BIT_MASK(IDW_DMA_ADDRESS_BITS)
 
-struct idw_dma_page {
+struct idw_dma_provider_page {
 	struct list_head link;
 	void *cpu_address;
 	dma_addr_t dma_address;
