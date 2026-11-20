@@ -1,7 +1,23 @@
 IDW PROJECT SNAPSHOT
-Version: 1.1.0-stage3a-infrastructure
+Version: 1.1.1-stage3a-integration
 Target: Intel HD Graphics 4600 / Haswell GT2 / PCI 8086:0412
 Host driver ownership: i915
+
+2026-11-20 Stage 3A integration audit:
+Corrected the Haswell PPGTT register model to per-engine MMIO. `PP_DCLV`,
+`PP_DIR_BASE`, `PP_DIR_BASE_READ`, and `INSTPM` are ring-relative registers:
+render `0x2000`, video `0x12000`, blitter `0x22000`. Activation now snapshots
+and restores each selected engine's `PP_DCLV` and `PP_DIR_BASE_READ`, programs
+each engine's `PP_DIR_BASE`, and posts each selected engine's `INSTPM`.
+Deactivation is best-effort across all steps and poisons on any failure. GGTT
+page directories are allocated pinned/resident and unpinned only during
+teardown. The ownership lifecycle now exposes
+`idw_device_lifecycle_set_ownership()` so i915-bound and exclusive-ownership
+observations can be refreshed immediately before `start()`. Focused and
+ASan/UBSan tests pass. This remains software and simulated-MMIO work: no PCI
+ownership, BAR mapping, forcewake, real MMIO, GGTT aperture ownership,
+physical page-table publication, or hardware page walk is claimed. i915
+remains bound and owns the physical GPU.
 
 2026-11-20 Stage 3A software infrastructure:
 Added a checked GGTT interval allocator with 4 KiB granularity, alignment,

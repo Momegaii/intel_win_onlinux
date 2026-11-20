@@ -76,6 +76,8 @@ struct idw_device_lifecycle {
 int idw_device_lifecycle_init(struct idw_device_lifecycle *lifecycle,
                               const struct idw_device_lifecycle_config *config,
                               void *context);
+int idw_device_lifecycle_set_ownership(struct idw_device_lifecycle *lifecycle,
+                                       bool i915_bound, bool exclusive);
 int idw_device_lifecycle_start(struct idw_device_lifecycle *lifecycle);
 int idw_device_lifecycle_quiesce(struct idw_device_lifecycle *lifecycle);
 int idw_device_lifecycle_recover(struct idw_device_lifecycle *lifecycle);

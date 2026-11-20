@@ -59,6 +59,25 @@ int idw_device_lifecycle_init(struct idw_device_lifecycle *lifecycle,
     return 0;
 }
 
+int idw_device_lifecycle_set_ownership(struct idw_device_lifecycle *lifecycle,
+                                       bool i915_bound, bool exclusive)
+{
+    if (!lifecycle || lifecycle->size != sizeof(*lifecycle) ||
+        lifecycle->version != IDW_DEVICE_LIFECYCLE_VERSION)
+        return -EINVAL;
+    if (lifecycle->poisoned)
+        return -EIO;
+    if (lifecycle->state != IDW_DEVICE_STATE_DORMANT &&
+        lifecycle->state != IDW_DEVICE_STATE_STOPPED &&
+        lifecycle->state != IDW_DEVICE_STATE_FAILED)
+        return -EBUSY;
+    if (lifecycle->completed_mask)
+        return -EBUSY;
+    lifecycle->i915_bound = i915_bound ? 1u : 0u;
+    lifecycle->exclusive = exclusive ? 1u : 0u;
+    return 0;
+}
+
 int idw_device_lifecycle_start(struct idw_device_lifecycle *lifecycle)
 {
     uint32_t i;

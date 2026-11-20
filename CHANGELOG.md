@@ -1,5 +1,12 @@
 # Change log
 
+## 2026-11-20 — Stage 3A integration audit
+- Corrected Haswell PPGTT register handling to per-engine MMIO: `PP_DCLV` at ring base + `0x220`, `PP_DIR_BASE` at +`0x228`, `PP_DIR_BASE_READ` at +`0x518`, and `INSTPM` at +`0xc0` for render (`0x2000`), video (`0x12000`), and blitter (`0x22000`). Activation now saves, programs, and restores each selected engine instead of using only the render aliases.
+- Changed activation snapshot to read `PP_DIR_BASE_READ`, and invalidation to post each selected engine's `INSTPM`. Deactivation now attempts disable, invalidate, restore, flush, and posting-read steps even after an earlier failure, then poisons and retains conservative active state.
+- Pinned GGTT page-directory allocations while live and unpinned them during teardown.
+- Added `idw_device_lifecycle_set_ownership()` to refresh i915-bound/exclusive observations before `start()`, and rejected refresh after the lifecycle becomes ready/initializing.
+- Updated tests for all three engine register bases, per-engine save/restore, directory pinning, and refreshed ownership. `make stage3a-test` and `make stage3a-sanitize-test` pass. No physical GPU operation was performed.
+
 ## 2026-11-20 — Stage 3A Haswell GTT/PPGTT infrastructure
 - Added `include/idw/ggtt_allocator.h` / `src/ggtt_allocator.c`: checked first-fit GGTT interval allocation over a caller-supplied aperture, 4 KiB granularity, power-of-two alignment, fixed reservations, unique cookies, stale-free rejection, pin/resident state, device-scoped DMA binding, and teardown refusal while live.
 - Added `include/idw/haswell_gtt_hw.h` / `src/haswell_gtt_hw.c`: hardware abstraction for GTTADDR read/write, GGTT flush, TLB invalidation, and per-engine PPGTT activation/deactivation. Activation snapshots and restores `PP_DCLV`/`PP_DIR_BASE`, rolls back enabled engines on failure, and poisons on GTT-access, invalidation, or rollback failure. Added an explicit software simulator with fault injection; no MMIO is issued.

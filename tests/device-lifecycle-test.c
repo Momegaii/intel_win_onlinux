@@ -114,14 +114,25 @@ static int test_ownership_rejection(void)
     reset_context(&context);
     CHECK(init_lifecycle(&lifecycle, &context, false, true, 0,
                          IDW_VENDOR_INTEL, IDW_DEVICE_HASWELL_GT2) == 0);
+    CHECK(idw_device_lifecycle_set_ownership(&lifecycle, true, true) == 0);
+    CHECK(idw_device_lifecycle_start(&lifecycle) == -EBUSY);
+    CHECK(context.init_count == 0);
+    CHECK(idw_device_lifecycle_set_ownership(&lifecycle, false, false) == 0);
+    CHECK(idw_device_lifecycle_start(&lifecycle) == -EPERM);
+    CHECK(context.init_count == 0);
+    CHECK(idw_device_lifecycle_set_ownership(&lifecycle, false, true) == 0);
     CHECK(idw_device_lifecycle_start(&lifecycle) == 0);
     CHECK(idw_device_lifecycle_is_ready(&lifecycle));
+    CHECK(idw_device_lifecycle_set_ownership(&lifecycle, false, true) ==
+          -EBUSY);
     CHECK(context.init_count == 4);
     CHECK(context.order_count == 4);
     CHECK(context.order[0] == 0 && context.order[1] == 1 &&
           context.order[2] == 2 && context.order[3] == 3);
     CHECK(idw_device_lifecycle_start(&lifecycle) == -EBUSY);
     CHECK(idw_device_lifecycle_destroy(&lifecycle) == -EBUSY);
+    CHECK(idw_device_lifecycle_quiesce(&lifecycle) == 0);
+    CHECK(idw_device_lifecycle_destroy(&lifecycle) == 0);
     return 0;
 }
 
@@ -224,6 +235,7 @@ static int test_invalid_config(void)
     config.version = IDW_DEVICE_LIFECYCLE_VERSION;
     config.size = sizeof(config) - 1;
     CHECK(idw_device_lifecycle_init(&lifecycle, &config, &context) == -EINVAL);
+    CHECK(idw_device_lifecycle_set_ownership(NULL, false, true) == -EINVAL);
     return 0;
 }
 

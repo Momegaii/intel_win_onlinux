@@ -839,3 +839,37 @@ was touched, no GGTT aperture was allocated on hardware, and no physical page
 walk is claimed. Stage 3 remains not implemented; Stage 3A supplies software
 infrastructure and simulated-MMIO evidence only. Details:
 `docs/design/HASWELL_GEN75_STAGE3A_READINESS.md`.
+
+
+### Stage 3A integration audit — per-engine PPGTT registers and teardown
+
+Corrected two integration defects found by comparing the abstraction with
+Linux i915 `intel_engine_regs.h` and the Haswell ring layout:
+
+- `PP_DCLV`, `PP_DIR_BASE`, `PP_DIR_BASE_READ`, and `INSTPM` are per-engine
+  registers at `base + 0x220`, `+0x228`, `+0x518`, and `+0xc0`. The previous
+  implementation used the render aliases for every engine, so blitter/video
+  activation would not have programmed their directories. The abstraction now
+  computes render (`0x2000`), video (`0x12000`), and blitter (`0x22000`)
+  offsets, snapshots each selected engine, and restores each engine on
+  deactivation/rollback.
+- Activation reads `PP_DIR_BASE_READ` rather than assuming `PP_DIR_BASE` is a
+  reliable readback register. Invalidation posts each selected engine's
+  `INSTPM`. Deactivation now attempts every step even after a failure, then
+  poisons and keeps the active state conservative.
+- The GGTT directory provider allocates page directories resident and pinned,
+  and unpins only during teardown.
+- The ownership lifecycle adds `idw_device_lifecycle_set_ownership()` to refresh
+  i915-bound/exclusive observations before `start()`, closing the stale-config
+  window.
+
+Focused validation:
+
+```text
+PASS: GGTT allocator, residency, binding, and teardown tests
+PASS: Haswell GGTT directory, hardware sequence, and rollback tests
+PASS: independent-device ownership, teardown, and recovery tests
+```
+
+ASan/UBSan with leak detection passed. No physical GPU operation was performed;
+i915 remains bound and no hardware register was touched.

@@ -60,11 +60,23 @@ static void fake_free_page(void *context, struct idw_dma_page *page)
 
 static int test_register_vectors(void)
 {
+    CHECK(IDW_HSW_RENDER_RING_BASE == 0x2000u);
+    CHECK(IDW_HSW_VIDEO_RING_BASE == 0x12000u);
+    CHECK(IDW_HSW_BLITTER_RING_BASE == 0x22000u);
     CHECK(IDW_HSW_REG_PGTBL_CTL == 0x2020u);
     CHECK(IDW_HSW_REG_INSTPM == 0x20c0u);
+    CHECK(IDW_HSW_RING_INSTPM(IDW_HSW_BLITTER_RING_BASE) == 0x220c0u);
+    CHECK(IDW_HSW_RING_INSTPM(IDW_HSW_VIDEO_RING_BASE) == 0x120c0u);
     CHECK(IDW_HSW_REG_PP_DCLV == 0x2220u);
     CHECK(IDW_HSW_REG_PP_DIR_BASE == 0x2228u);
+    CHECK(IDW_HSW_REG_PP_DIR_BASE_READ == 0x2518u);
     CHECK(IDW_HSW_REG_RING_MODE_GEN7 == 0x229cu);
+    CHECK(IDW_HSW_RING_PP_DIR_DCLV(IDW_HSW_BLITTER_RING_BASE) == 0x22220u);
+    CHECK(IDW_HSW_RING_PP_DIR_BASE(IDW_HSW_BLITTER_RING_BASE) == 0x22228u);
+    CHECK(IDW_HSW_RING_PP_DIR_BASE_READ(IDW_HSW_BLITTER_RING_BASE) ==
+          0x22518u);
+    CHECK(IDW_HSW_RING_MODE_GEN7(IDW_HSW_BLITTER_RING_BASE) == 0x2229cu);
+    CHECK(IDW_HSW_RING_PP_DIR_DCLV(IDW_HSW_VIDEO_RING_BASE) == 0x12220u);
     CHECK(IDW_HSW_REG_ECOCHK == 0x4090u);
     CHECK(IDW_HSW_REG_GAC_ECO_BITS == 0x14090u);
     CHECK(IDW_HSW_REG_GFX_FLSH_CNTL_GEN6 == 0x101008u);
@@ -88,6 +100,7 @@ static int test_directory_and_activation(void)
     struct idw_hsw_ppgtt_model *model = NULL;
     struct idw_dma_page_mapping mapping;
     struct idw_hsw_ppgtt_translation translation;
+    struct idw_ggtt_allocation_info info;
     struct fake_pages pages;
     uint32_t pde;
     uint32_t value;
@@ -144,6 +157,10 @@ static int test_directory_and_activation(void)
     CHECK(idw_ggtt_directory_fini(&provider) == -EBUSY);
     directory_offset = idw_hsw_ppgtt_directory_ggtt_offset(model);
     CHECK(directory_offset == 0);
+    info.size = sizeof(info);
+    CHECK(idw_ggtt_query(ggtt, directory_offset, 1, &info) == 0);
+    CHECK(info.pin_count == 1 && info.resident == 1);
+    CHECK((info.flags & IDW_GGTT_ALLOC_PAGE_DIRECTORY) != 0);
     CHECK(idw_hsw_hw_sim_read_gtt(hw, directory_offset, &value) == 0);
     CHECK(value == 0);
 
@@ -156,6 +173,23 @@ static int test_directory_and_activation(void)
     CHECK(idw_hsw_ppgtt_translate(model, 0x200000, &translation) == 0);
     CHECK(translation.dma_address == 0x300000);
 
+    CHECK(idw_hsw_hw_sim_write_reg(hw, IDW_HSW_REG_PP_DCLV,
+                                   0x11111111u) == 0);
+    CHECK(idw_hsw_hw_sim_write_reg(hw, IDW_HSW_REG_PP_DIR_BASE,
+                                   0x1000u) == 0);
+    CHECK(idw_hsw_hw_sim_write_reg(
+              hw, IDW_HSW_RING_PP_DIR_DCLV(IDW_HSW_BLITTER_RING_BASE),
+              0x22222222u) == 0);
+    CHECK(idw_hsw_hw_sim_write_reg(
+              hw, IDW_HSW_RING_PP_DIR_BASE(IDW_HSW_BLITTER_RING_BASE),
+              0x2000u) == 0);
+    CHECK(idw_hsw_hw_sim_write_reg(
+              hw, IDW_HSW_RING_PP_DIR_DCLV(IDW_HSW_VIDEO_RING_BASE),
+              0x33333333u) == 0);
+    CHECK(idw_hsw_hw_sim_write_reg(
+              hw, IDW_HSW_RING_PP_DIR_BASE(IDW_HSW_VIDEO_RING_BASE),
+              0x3000u) == 0);
+
     CHECK(idw_hsw_hw_activate(hw, IDW_HSW_ENGINE_RENDER |
                                    IDW_HSW_ENGINE_BLITTER,
                               directory_offset) == 0);
@@ -166,16 +200,50 @@ static int test_directory_and_activation(void)
           (IDW_HSW_ENGINE_RENDER | IDW_HSW_ENGINE_BLITTER));
     CHECK(idw_hsw_hw_sim_read_reg(hw, IDW_HSW_REG_PP_DCLV, &value) == 0);
     CHECK(value == IDW_HSW_PP_DIR_DCLV_2G);
-    CHECK(idw_hsw_hw_sim_read_reg(hw, IDW_HSW_REG_PP_DIR_BASE, &value) == 0);
+    CHECK(idw_hsw_hw_sim_read_reg(hw, IDW_HSW_REG_PP_DIR_BASE_READ,
+                                  &value) == 0);
     CHECK(value == 0);
+    CHECK(idw_hsw_hw_sim_read_reg(
+              hw, IDW_HSW_RING_PP_DIR_DCLV(IDW_HSW_BLITTER_RING_BASE),
+              &value) == 0);
+    CHECK(value == IDW_HSW_PP_DIR_DCLV_2G);
+    CHECK(idw_hsw_hw_sim_read_reg(
+              hw, IDW_HSW_RING_PP_DIR_BASE_READ(IDW_HSW_BLITTER_RING_BASE),
+              &value) == 0);
+    CHECK(value == 0);
+    CHECK(idw_hsw_hw_sim_read_reg(
+              hw, IDW_HSW_RING_PP_DIR_DCLV(IDW_HSW_VIDEO_RING_BASE),
+              &value) == 0);
+    CHECK(value == 0x33333333u);
+    CHECK(idw_hsw_hw_sim_read_reg(
+              hw, IDW_HSW_RING_PP_DIR_BASE_READ(IDW_HSW_VIDEO_RING_BASE),
+              &value) == 0);
+    CHECK(value == 0x3000u);
     CHECK(idw_hsw_hw_invalidate(hw, IDW_HSW_ENGINE_RENDER) == 0);
     CHECK(idw_hsw_hw_deactivate(hw) == 0);
     CHECK(!idw_hsw_hw_is_active(hw));
     CHECK(idw_hsw_hw_sim_engine_mask(hw) == 0);
     CHECK(idw_hsw_hw_sim_read_reg(hw, IDW_HSW_REG_PP_DCLV, &value) == 0);
-    CHECK(value == 0);
-    CHECK(idw_hsw_hw_sim_read_reg(hw, IDW_HSW_REG_PP_DIR_BASE, &value) == 0);
-    CHECK(value == 0);
+    CHECK(value == 0x11111111u);
+    CHECK(idw_hsw_hw_sim_read_reg(hw, IDW_HSW_REG_PP_DIR_BASE_READ,
+                                  &value) == 0);
+    CHECK(value == 0x1000u);
+    CHECK(idw_hsw_hw_sim_read_reg(
+              hw, IDW_HSW_RING_PP_DIR_DCLV(IDW_HSW_BLITTER_RING_BASE),
+              &value) == 0);
+    CHECK(value == 0x22222222u);
+    CHECK(idw_hsw_hw_sim_read_reg(
+              hw, IDW_HSW_RING_PP_DIR_BASE_READ(IDW_HSW_BLITTER_RING_BASE),
+              &value) == 0);
+    CHECK(value == 0x2000u);
+    CHECK(idw_hsw_hw_sim_read_reg(
+              hw, IDW_HSW_RING_PP_DIR_DCLV(IDW_HSW_VIDEO_RING_BASE),
+              &value) == 0);
+    CHECK(value == 0x33333333u);
+    CHECK(idw_hsw_hw_sim_read_reg(
+              hw, IDW_HSW_RING_PP_DIR_BASE_READ(IDW_HSW_VIDEO_RING_BASE),
+              &value) == 0);
+    CHECK(value == 0x3000u);
 
     CHECK(idw_hsw_ppgtt_unmap(model, 0x200000, IDW_GGTT_PAGE_BYTES) == 0);
     {

@@ -126,9 +126,10 @@ reclamation. No hardware state was changed and i915 remains bound.
 
 Stage 3A adds the software gate before hardware use: a checked GGTT interval
 allocator with residency/pin/binding state, a Haswell GTTADDR/flush/invalidate/
-per-engine-activation abstraction with saved-register rollback and poison on
-uncertain state, an explicit simulated backend, a GGTT-backed page-directory
-provider, and a staged independent-device ownership lifecycle. Run
+per-engine-activation abstraction with per-engine saved-register rollback and
+poison on uncertain state, an explicit simulated backend, a pinned GGTT-backed
+page-directory provider, and a staged independent-device ownership lifecycle
+that can refresh i915-bound/exclusive observations before start. Run
 `make stage3a-test` and `make stage3a-sanitize-test`. These tests use simulated
 MMIO and do not acquire PCI ownership, map a BAR, write a physical register,
 allocate a physical GGTT range, or prove a page walk. Details:

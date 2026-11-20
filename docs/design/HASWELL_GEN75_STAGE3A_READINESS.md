@@ -96,8 +96,10 @@ release
 ```
 
 The real backend must own PCI BAR mapping, forcewake, register serialization,
-engine-specific offsets, and the actual INSTPM poll. The abstraction does not
-provide those implementations.
+and the actual INSTPM poll. The abstraction computes the Haswell per-engine
+register offsets (`RING_INSTPM`, `RING_PP_DIR_DCLV`, `RING_PP_DIR_BASE`,
+`RING_PP_DIR_BASE_READ`, and `RING_MODE_GEN7`) from the render, blitter, and
+video ring bases; the backend maps those offsets to the owned BAR.
 
 High-level operations:
 
@@ -106,18 +108,22 @@ High-level operations:
 - `idw_hsw_hw_flush_gtt()` calls the GGTT flush callback and a posting read at
   `GFX_FLSH_CNTL_GEN6`.
 - `idw_hsw_hw_invalidate()` validates the engine mask, calls the TLB-invalidate
-  callback, and performs a posting read at `INSTPM`.
-- `idw_hsw_hw_activate()` flushes the GGTT, snapshots `PP_DCLV` and
-  `PP_DIR_BASE`, writes `PP_DCLV = 0xffffffff`, writes the directory GGTT
-  offset to `PP_DIR_BASE`, enables PPGTT on each requested engine, and
-  invalidates the engine TLBs.
+  callback, and performs a posting read at each selected engine's `INSTPM`
+  register.
+- `idw_hsw_hw_activate()` flushes the GGTT, snapshots each selected engine's
+  `PP_DCLV` and `PP_DIR_BASE_READ`, writes `PP_DCLV = 0xffffffff` and the
+  directory GGTT offset to each selected engine's `PP_DIR_BASE`, enables PPGTT
+  on each requested engine, and invalidates the engine TLBs. It does not write
+  only the render-engine aliases at `0x2220`/`0x2228`.
 - `idw_hsw_hw_deactivate()` disables the active engines, invalidates, restores
-  the saved global registers, flushes, and posts.
+  each engine's saved `PP_DCLV`/`PP_DIR_BASE`, flushes, and posts. Every step is
+  attempted even after an earlier failure; any failure poisons the abstraction
+  and keeps the active state conservative.
 - Activation failure rolls back enabled engines and restores the saved
-  registers. A rollback failure poisons the abstraction. An invalidation
-  failure during activation always poisons because TLB state is uncertain. A
-  failed GTT read, GTT write, or GTT flush also poisons because hardware
-  visibility is uncertain.
+  per-engine registers. A rollback failure poisons the abstraction. An
+  invalidation failure during activation always poisons because TLB state is
+  uncertain. A failed GTT read, GTT write, or GTT flush also poisons because
+  hardware visibility is uncertain.
 - Once poisoned, all subsequent operations return `-EIO`.
 
 Register offsets and masks are defined in the header, not hardcoded in callers.
@@ -133,10 +139,12 @@ Files:
 
 The provider implements `struct idw_hsw_ppgtt_directory_ops`:
 
-- `alloc_directory`: allocates one 4 KiB, page-directory-tagged GGTT range,
-  zeroes all 512 PDE slots through GTTADDR, and flushes.
-- `free_directory`: zeroes the slots through GTTADDR, flushes, and frees the
-  GGTT range. Teardown continues to the free step even if zeroing/flushing
+- `alloc_directory`: allocates one 4 KiB, page-directory-tagged, resident and
+  pinned GGTT range, zeroes all 512 PDE slots through GTTADDR, and flushes. The
+  pin prevents the allocator from releasing a hardware-visible directory while
+  the model owns it.
+- `free_directory`: zeroes the slots through GTTADDR, flushes, unpins, and frees
+  the GGTT range. Teardown continues to the free step even if zeroing/flushing
   fails, and marks the provider poisoned.
 - `write_pde_gttaddr` / `read_pde_gttaddr`: validate the directory scope and
   use the hardware abstraction.
@@ -167,6 +175,10 @@ Ownership gates:
 
 - `i915_bound == true` rejects `start()` with `-EBUSY`.
 - `exclusive == false` rejects `start()` with `-EPERM`.
+- `idw_device_lifecycle_set_ownership()` refreshes the observed i915-bound and
+  exclusive-ownership state before `start()`; it is rejected once the lifecycle
+  is ready or initializing. The caller must refresh observations after init and
+  immediately before claiming the device.
 - The optional Haswell GT2 identity check requires `8086:0412`.
 - The caller supplies the device/generation scope.
 
@@ -203,16 +215,18 @@ Coverage:
 
 - GGTT first-fit, alignment, fixed reservations, overlap, duplicate cookies,
   stale frees, pin/resident/bind, teardown refusal, and exhaustion.
-- Haswell register golden offsets/masks, GTTADDR PDE read/write, directory
-  residency, activation/deactivation register sequence, engine masks,
-  invalidation, failed-engine rollback without poison, GTT-write and
-  invalidation failure poison, and invalid ranges.
+- Haswell register golden offsets/masks for all three engine bases, GTTADDR
+  PDE read/write, directory residency and pinning, per-engine
+  activation/deactivation with save/restore, engine masks, per-engine INSTPM
+  barriers, failed-engine rollback without poison, GTT-write and invalidation
+  failure poison, and invalid ranges.
 - PPGTT model integration through the GGTT directory provider, including a
   mapped PDE visible in simulated GTT, translation, activation, reclaim,
   device-scope mismatch rejection, and teardown.
 - Ownership rejection with i915 bound, non-exclusive ownership, and wrong PCI
-  identity; successful staged start; reverse teardown; init-failure rollback;
-  cleanup-failure poison; recovery; and destroy guards.
+  identity; refreshed ownership observations before start; successful staged
+  start; reverse teardown; init-failure rollback; cleanup-failure poison;
+  recovery; and destroy guards.
 
 Executed results on 2026-11-20:
 
@@ -238,7 +252,8 @@ Before a real backend may program hardware:
    interrupt ownership, with save/restore and recovery.
 2. Obtain the real GGTT aperture base/size from the owned device and prove
    exclusive GGTT ownership.
-3. Implement a real MMIO/GTTADDR backend and engine-specific register offsets.
+3. Implement a real MMIO/GTTADDR backend for the per-engine offsets defined by
+   the abstraction.
 4. Resolve Haswell cache policy (`ECOCHK`, `GAC_ECO_BITS`), `PP_DCLV`
    semantics, coherency/IOMMU behavior, and the `PGTBL_CTL2` open question.
 5. Add locking, sleepability, and callback-context rules for the real backend.

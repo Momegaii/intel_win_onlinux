@@ -9,6 +9,11 @@
 #define IDW_HSW_SIM_REG_WORDS (IDW_HSW_SIM_REG_BYTES / 4u)
 #define IDW_HSW_SIM_MAX_GGTT_BYTES (64ull * 1024u * 1024u)
 
+struct idw_hsw_hw_saved_engine {
+    uint32_t dclv;
+    uint32_t dir_base;
+};
+
 struct idw_hsw_hw {
     struct idw_hsw_hw_ops ops;
     void *context;
@@ -16,8 +21,8 @@ struct idw_hsw_hw {
     uint64_t ggtt_bytes;
     uint32_t flags;
     uint32_t active_engines;
-    uint32_t saved_dclv;
-    uint32_t saved_dir_base;
+    struct idw_hsw_hw_saved_engine saved[3];
+    uint32_t saved_mask;
     bool initialized;
     bool active;
     bool poisoned;
@@ -26,6 +31,39 @@ struct idw_hsw_hw {
 static bool engine_mask_valid(uint32_t mask)
 {
     return mask && !(mask & ~IDW_HSW_ENGINE_ALL);
+}
+
+static int engine_index(uint32_t engine)
+{
+    switch (engine) {
+    case IDW_HSW_ENGINE_RENDER:
+        return 0;
+    case IDW_HSW_ENGINE_BLITTER:
+        return 1;
+    case IDW_HSW_ENGINE_VIDEO:
+        return 2;
+    default:
+        return -1;
+    }
+}
+
+static uint32_t engine_base(uint32_t engine)
+{
+    switch (engine) {
+    case IDW_HSW_ENGINE_RENDER:
+        return IDW_HSW_RENDER_RING_BASE;
+    case IDW_HSW_ENGINE_BLITTER:
+        return IDW_HSW_BLITTER_RING_BASE;
+    case IDW_HSW_ENGINE_VIDEO:
+        return IDW_HSW_VIDEO_RING_BASE;
+    default:
+        return 0;
+    }
+}
+
+static uint32_t engine_reg(uint32_t engine, uint32_t offset)
+{
+    return engine_base(engine) + offset;
 }
 
 static bool directory_valid(const struct idw_hsw_hw *hw, uint64_t directory)
@@ -40,16 +78,35 @@ static void poison(struct idw_hsw_hw *hw)
     hw->poisoned = true;
 }
 
-static int restore_registers(struct idw_hsw_hw *hw)
+static int restore_engines(struct idw_hsw_hw *hw, uint32_t mask)
 {
+    uint32_t engines[] = {
+        IDW_HSW_ENGINE_RENDER, IDW_HSW_ENGINE_BLITTER, IDW_HSW_ENGINE_VIDEO
+    };
+    uint32_t i;
+    int first_error = 0;
     int ret;
 
-    ret = hw->ops.write32(hw->context, IDW_HSW_REG_PP_DCLV,
-                          hw->saved_dclv);
-    if (ret)
-        return ret;
-    return hw->ops.write32(hw->context, IDW_HSW_REG_PP_DIR_BASE,
-                           hw->saved_dir_base);
+    for (i = 0; i < sizeof(engines) / sizeof(engines[0]); ++i) {
+        int index;
+
+        if (!(mask & engines[i]))
+            continue;
+        index = engine_index(engines[i]);
+        ret = hw->ops.write32(
+            hw->context,
+            engine_reg(engines[i], IDW_HSW_RING_PP_DIR_DCLV(0)),
+            hw->saved[index].dclv);
+        if (ret && !first_error)
+            first_error = ret;
+        ret = hw->ops.write32(
+            hw->context,
+            engine_reg(engines[i], IDW_HSW_RING_PP_DIR_BASE(0)),
+            hw->saved[index].dir_base);
+        if (ret && !first_error)
+            first_error = ret;
+    }
+    return first_error;
 }
 
 static int disable_engines(struct idw_hsw_hw *hw, uint32_t mask)
@@ -71,13 +128,14 @@ static int disable_engines(struct idw_hsw_hw *hw, uint32_t mask)
     return first_error;
 }
 
-static int rollback_activation(struct idw_hsw_hw *hw, uint32_t enabled)
+static int rollback_activation(struct idw_hsw_hw *hw, uint32_t enabled,
+                               uint32_t saved_mask)
 {
     int ret;
     int first_error;
 
     first_error = disable_engines(hw, enabled);
-    ret = restore_registers(hw);
+    ret = restore_engines(hw, saved_mask);
     if (ret && !first_error)
         first_error = ret;
     ret = hw->ops.gtt_flush(hw->context);
@@ -93,7 +151,68 @@ static int rollback_activation(struct idw_hsw_hw *hw, uint32_t enabled)
     }
     if (first_error)
         poison(hw);
+    else
+        hw->saved_mask = 0;
     return first_error;
+}
+
+static int snapshot_engines(struct idw_hsw_hw *hw, uint32_t mask)
+{
+    uint32_t engines[] = {
+        IDW_HSW_ENGINE_RENDER, IDW_HSW_ENGINE_BLITTER, IDW_HSW_ENGINE_VIDEO
+    };
+    uint32_t i;
+    int ret;
+
+    for (i = 0; i < sizeof(engines) / sizeof(engines[0]); ++i) {
+        int index;
+
+        if (!(mask & engines[i]))
+            continue;
+        index = engine_index(engines[i]);
+        ret = hw->ops.read32(
+            hw->context,
+            engine_reg(engines[i], IDW_HSW_RING_PP_DIR_DCLV(0)),
+            &hw->saved[index].dclv);
+        if (ret)
+            return ret;
+        ret = hw->ops.read32(
+            hw->context,
+            engine_reg(engines[i], IDW_HSW_RING_PP_DIR_BASE_READ(0)),
+            &hw->saved[index].dir_base);
+        if (ret)
+            return ret;
+        hw->saved_mask |= engines[i];
+    }
+    return 0;
+}
+
+static int program_engines(struct idw_hsw_hw *hw, uint32_t mask,
+                           uint64_t directory_ggtt)
+{
+    uint32_t engines[] = {
+        IDW_HSW_ENGINE_RENDER, IDW_HSW_ENGINE_BLITTER, IDW_HSW_ENGINE_VIDEO
+    };
+    uint32_t i;
+    int ret;
+
+    for (i = 0; i < sizeof(engines) / sizeof(engines[0]); ++i) {
+        if (!(mask & engines[i]))
+            continue;
+        ret = hw->ops.write32(
+            hw->context,
+            engine_reg(engines[i], IDW_HSW_RING_PP_DIR_DCLV(0)),
+            IDW_HSW_PP_DIR_DCLV_2G);
+        if (ret)
+            return ret;
+        ret = hw->ops.write32(
+            hw->context,
+            engine_reg(engines[i], IDW_HSW_RING_PP_DIR_BASE(0)),
+            (uint32_t)directory_ggtt);
+        if (ret)
+            return ret;
+    }
+    return 0;
 }
 
 int idw_hsw_hw_init(const struct idw_hsw_hw_config *config,
@@ -209,7 +328,10 @@ int idw_hsw_hw_flush_gtt(struct idw_hsw_hw *hw)
 
 int idw_hsw_hw_invalidate(struct idw_hsw_hw *hw, uint32_t engine_mask)
 {
-    uint32_t value;
+    uint32_t engines[] = {
+        IDW_HSW_ENGINE_RENDER, IDW_HSW_ENGINE_BLITTER, IDW_HSW_ENGINE_VIDEO
+    };
+    uint32_t i;
     int ret;
 
     ret = idw_hsw_hw_check(hw);
@@ -222,10 +344,20 @@ int idw_hsw_hw_invalidate(struct idw_hsw_hw *hw, uint32_t engine_mask)
         poison(hw);
         return ret;
     }
-    ret = hw->ops.posting_read(hw->context, IDW_HSW_REG_INSTPM, &value);
-    if (ret)
-        poison(hw);
-    return ret;
+    for (i = 0; i < sizeof(engines) / sizeof(engines[0]); ++i) {
+        uint32_t value;
+
+        if (!(engine_mask & engines[i]))
+            continue;
+        ret = hw->ops.posting_read(
+            hw->context, engine_reg(engines[i], IDW_HSW_RING_INSTPM(0)),
+            &value);
+        if (ret) {
+            poison(hw);
+            return ret;
+        }
+    }
+    return 0;
 }
 
 int idw_hsw_hw_activate(struct idw_hsw_hw *hw, uint32_t engine_mask,
@@ -249,29 +381,16 @@ int idw_hsw_hw_activate(struct idw_hsw_hw *hw, uint32_t engine_mask,
     ret = idw_hsw_hw_flush_gtt(hw);
     if (ret)
         return ret;
-    ret = hw->ops.read32(hw->context, IDW_HSW_REG_PP_DCLV,
-                         &hw->saved_dclv);
+    hw->saved_mask = 0;
+    ret = snapshot_engines(hw, engine_mask);
     if (ret) {
+        hw->saved_mask = 0;
         poison(hw);
         return ret;
     }
-    ret = hw->ops.read32(hw->context, IDW_HSW_REG_PP_DIR_BASE,
-                         &hw->saved_dir_base);
+    ret = program_engines(hw, engine_mask, directory_ggtt);
     if (ret) {
-        poison(hw);
-        return ret;
-    }
-    ret = hw->ops.write32(hw->context, IDW_HSW_REG_PP_DCLV,
-                          IDW_HSW_PP_DIR_DCLV_2G);
-    if (ret) {
-        if (rollback_activation(hw, 0))
-            return -EIO;
-        return ret;
-    }
-    ret = hw->ops.write32(hw->context, IDW_HSW_REG_PP_DIR_BASE,
-                          (uint32_t)directory_ggtt);
-    if (ret) {
-        if (rollback_activation(hw, 0))
+        if (rollback_activation(hw, 0, hw->saved_mask))
             return -EIO;
         return ret;
     }
@@ -280,16 +399,16 @@ int idw_hsw_hw_activate(struct idw_hsw_hw *hw, uint32_t engine_mask,
             continue;
         ret = hw->ops.set_engine_ppgtt(hw->context, engines[i], true);
         if (ret) {
-            if (rollback_activation(hw, enabled | engines[i]))
+            if (rollback_activation(hw, enabled | engines[i],
+                                    hw->saved_mask))
                 return -EIO;
             return ret;
         }
         enabled |= engines[i];
     }
-    ret = hw->ops.invalidate_tlb(hw->context, engine_mask);
+    ret = idw_hsw_hw_invalidate(hw, engine_mask);
     if (ret) {
-        poison(hw);
-        rollback_activation(hw, enabled);
+        rollback_activation(hw, enabled, hw->saved_mask);
         return ret;
     }
     hw->active = true;
@@ -299,7 +418,10 @@ int idw_hsw_hw_activate(struct idw_hsw_hw *hw, uint32_t engine_mask,
 
 int idw_hsw_hw_deactivate(struct idw_hsw_hw *hw)
 {
+    uint32_t active_engines;
+    uint32_t saved_mask;
     uint32_t value;
+    int first_error;
     int ret;
 
     ret = idw_hsw_hw_check(hw);
@@ -307,34 +429,29 @@ int idw_hsw_hw_deactivate(struct idw_hsw_hw *hw)
         return ret;
     if (!hw->active)
         return -EINVAL;
-    ret = disable_engines(hw, hw->active_engines);
-    if (ret) {
-        poison(hw);
-        return ret;
-    }
-    ret = hw->ops.invalidate_tlb(hw->context, hw->active_engines);
-    if (ret) {
-        poison(hw);
-        return ret;
-    }
-    ret = restore_registers(hw);
-    if (ret) {
-        poison(hw);
-        return ret;
-    }
+    active_engines = hw->active_engines;
+    saved_mask = hw->saved_mask;
+    first_error = disable_engines(hw, active_engines);
+    ret = idw_hsw_hw_invalidate(hw, active_engines);
+    if (ret && !first_error)
+        first_error = ret;
+    ret = restore_engines(hw, saved_mask);
+    if (ret && !first_error)
+        first_error = ret;
     ret = hw->ops.gtt_flush(hw->context);
-    if (ret) {
-        poison(hw);
-        return ret;
-    }
+    if (ret && !first_error)
+        first_error = ret;
     ret = hw->ops.posting_read(hw->context,
                                IDW_HSW_REG_GFX_FLSH_CNTL_GEN6, &value);
-    if (ret) {
+    if (ret && !first_error)
+        first_error = ret;
+    if (first_error) {
         poison(hw);
-        return ret;
+        return first_error;
     }
     hw->active = false;
     hw->active_engines = 0;
+    hw->saved_mask = 0;
     return 0;
 }
 
@@ -398,6 +515,25 @@ static int sim_read32(void *context, uint32_t offset, uint32_t *value)
     return 0;
 }
 
+static uint32_t sim_pp_dir_base_read_alias(uint32_t offset)
+{
+    if (offset == IDW_HSW_RING_PP_DIR_BASE(IDW_HSW_RENDER_RING_BASE))
+        return IDW_HSW_RING_PP_DIR_BASE_READ(IDW_HSW_RENDER_RING_BASE);
+    if (offset == IDW_HSW_RING_PP_DIR_BASE(IDW_HSW_BLITTER_RING_BASE))
+        return IDW_HSW_RING_PP_DIR_BASE_READ(IDW_HSW_BLITTER_RING_BASE);
+    if (offset == IDW_HSW_RING_PP_DIR_BASE(IDW_HSW_VIDEO_RING_BASE))
+        return IDW_HSW_RING_PP_DIR_BASE_READ(IDW_HSW_VIDEO_RING_BASE);
+    return offset;
+}
+
+static void sim_store_reg(struct idw_hsw_hw_sim *sim, uint32_t offset,
+                          uint32_t value)
+{
+    sim->registers[offset / 4u] = value;
+    offset = sim_pp_dir_base_read_alias(offset);
+    sim->registers[offset / 4u] = value;
+}
+
 static int sim_write32(void *context, uint32_t offset, uint32_t value)
 {
     struct idw_hsw_hw_sim *sim = context;
@@ -406,7 +542,7 @@ static int sim_write32(void *context, uint32_t offset, uint32_t value)
         return -EINVAL;
     if (sim_fail(sim, IDW_HSW_HW_SIM_FAIL_WRITE))
         return -EIO;
-    sim->registers[offset / 4u] = value;
+    sim_store_reg(sim, offset, value);
     ++sim->stats.writes;
     return 0;
 }
@@ -605,6 +741,17 @@ int idw_hsw_hw_sim_read_reg(const struct idw_hsw_hw *hw, uint32_t offset,
     if (!sim)
         return -EINVAL;
     *value = sim->registers[offset / 4u];
+    return 0;
+}
+
+int idw_hsw_hw_sim_write_reg(struct idw_hsw_hw *hw, uint32_t offset,
+                             uint32_t value)
+{
+    struct idw_hsw_hw_sim *sim = sim_from_hw(hw);
+
+    if (!sim || (offset & 3u) || offset > IDW_HSW_SIM_REG_BYTES - 4u)
+        return -EINVAL;
+    sim_store_reg(sim, offset, value);
     return 0;
 }
 

@@ -50,15 +50,20 @@ static int alloc_directory(void *context,
     cookie = ++provider->next_cookie;
     ret = idw_ggtt_alloc(provider->ggtt, IDW_HSW_PPGTT_DIRECTORY_BYTES,
                          provider->alignment, cookie,
-                         IDW_GGTT_ALLOC_RESIDENT |
+                         IDW_GGTT_ALLOC_RESIDENT | IDW_GGTT_ALLOC_PINNED |
                              IDW_GGTT_ALLOC_PAGE_DIRECTORY,
                          &offset);
     if (ret)
         return ret;
     ret = zero_directory(provider, offset);
     if (ret) {
-        if (idw_ggtt_free(provider->ggtt, offset,
-                          IDW_HSW_PPGTT_DIRECTORY_BYTES, cookie))
+        int cleanup = idw_ggtt_unpin(provider->ggtt, offset,
+                                     IDW_HSW_PPGTT_DIRECTORY_BYTES, cookie);
+
+        if (!cleanup)
+            cleanup = idw_ggtt_free(provider->ggtt, offset,
+                                    IDW_HSW_PPGTT_DIRECTORY_BYTES, cookie);
+        if (cleanup)
             provider->poisoned = 1;
         return ret;
     }
@@ -90,9 +95,15 @@ static void free_directory(void *context,
     ret = zero_directory(provider, directory->ggtt_offset);
     if (ret)
         provider->poisoned = 1;
-    ret = idw_ggtt_free(provider->ggtt, directory->ggtt_offset,
-                        IDW_HSW_PPGTT_DIRECTORY_BYTES,
-                        directory->allocation_cookie);
+    ret = idw_ggtt_unpin(provider->ggtt, directory->ggtt_offset,
+                         IDW_HSW_PPGTT_DIRECTORY_BYTES,
+                         directory->allocation_cookie);
+    if (ret)
+        provider->poisoned = 1;
+    else
+        ret = idw_ggtt_free(provider->ggtt, directory->ggtt_offset,
+                            IDW_HSW_PPGTT_DIRECTORY_BYTES,
+                            directory->allocation_cookie);
     if (ret)
         provider->poisoned = 1;
     if (!ret) {

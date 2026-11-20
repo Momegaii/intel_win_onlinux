@@ -15,12 +15,27 @@
 #define IDW_HSW_GGTT_RECOMMENDED_ALIGN (64u * 1024u)
 #define IDW_HSW_PP_DIR_DCLV_2G 0xffffffffu
 
-/* Haswell register offsets. These are definitions only; no MMIO is issued. */
+/* Haswell engine MMIO bases and per-engine PPGTT register offsets. */
+#define IDW_HSW_RENDER_RING_BASE 0x2000u
+#define IDW_HSW_VIDEO_RING_BASE 0x12000u
+#define IDW_HSW_BLITTER_RING_BASE 0x22000u
+
+#define IDW_HSW_RING_INSTPM(base) ((base) + 0xc0u)
+#define IDW_HSW_RING_PP_DIR_DCLV(base) ((base) + 0x220u)
+#define IDW_HSW_RING_PP_DIR_BASE(base) ((base) + 0x228u)
+#define IDW_HSW_RING_PP_DIR_BASE_READ(base) ((base) + 0x518u)
+#define IDW_HSW_RING_MODE_GEN7(base) ((base) + 0x29cu)
+
+/* Render-engine aliases retained for register-vector tests and callers. */
 #define IDW_HSW_REG_PGTBL_CTL 0x2020u
-#define IDW_HSW_REG_INSTPM 0x20c0u
-#define IDW_HSW_REG_PP_DCLV 0x2220u
-#define IDW_HSW_REG_PP_DIR_BASE 0x2228u
-#define IDW_HSW_REG_RING_MODE_GEN7 0x229cu
+#define IDW_HSW_REG_INSTPM IDW_HSW_RING_INSTPM(IDW_HSW_RENDER_RING_BASE)
+#define IDW_HSW_REG_PP_DCLV IDW_HSW_RING_PP_DIR_DCLV(IDW_HSW_RENDER_RING_BASE)
+#define IDW_HSW_REG_PP_DIR_BASE \
+    IDW_HSW_RING_PP_DIR_BASE(IDW_HSW_RENDER_RING_BASE)
+#define IDW_HSW_REG_PP_DIR_BASE_READ \
+    IDW_HSW_RING_PP_DIR_BASE_READ(IDW_HSW_RENDER_RING_BASE)
+#define IDW_HSW_REG_RING_MODE_GEN7 \
+    IDW_HSW_RING_MODE_GEN7(IDW_HSW_RENDER_RING_BASE)
 #define IDW_HSW_REG_ECOCHK 0x4090u
 #define IDW_HSW_REG_GAC_ECO_BITS 0x14090u
 #define IDW_HSW_REG_GFX_FLSH_CNTL_GEN6 0x101008u
@@ -127,6 +142,8 @@ int idw_hsw_hw_sim_get_stats(const struct idw_hsw_hw *hw,
                              struct idw_hsw_hw_sim_stats *stats);
 int idw_hsw_hw_sim_read_reg(const struct idw_hsw_hw *hw, uint32_t offset,
                             uint32_t *value);
+int idw_hsw_hw_sim_write_reg(struct idw_hsw_hw *hw, uint32_t offset,
+                             uint32_t value);
 int idw_hsw_hw_sim_read_gtt(const struct idw_hsw_hw *hw, uint64_t offset,
                             uint32_t *value);
 uint32_t idw_hsw_hw_sim_engine_mask(const struct idw_hsw_hw *hw);
