@@ -52,8 +52,8 @@ PPGTT and independent GPU ownership are not implemented.
 | Stage | Milestone | Proof required | Status |
 |---|---|---|---|
 | 1 | GPU resource read/write | GPU writes data into a managed resource; CPU reads back the exact result. | **Passed, i915-assisted:** Haswell `8086:0412` wrote `0x2468ace0` at offset 16; CPU PREAD verified it after GEM_WAIT. i915 owns execution and mappings. |
-| 2 | Native DMA | IDW allocates and maps real DMA memory for its exclusively owned PCI device. | **In progress:** QEMU EDU virtual-device DMA and remove cleanup passed under TCG; physical Haswell DMA remains unproven and i915 remains bound. See the preserved run log in `tests/qemu-dma/evidence-2026-11-20-tcg.log`. |
-| 3 | Hardware PPGTT | GPU uses IDW-created Haswell Gen7.5 page tables. | Not implemented; existing PPGTT is a CPU-only model. |
+| 2 | Native DMA | IDW allocates and maps real DMA memory for its exclusively owned PCI device. | **In progress:** QEMU EDU virtual-device DMA and remove cleanup passed under TCG. Page-table storage and its QEMU copy check are implemented but not yet executed; physical Haswell DMA remains unproven and i915 remains bound. See the preserved run log in `tests/qemu-dma/evidence-2026-11-20-tcg.log`. |
+| 3 | Hardware PPGTT | GPU uses IDW-created Haswell Gen7.5 page tables. | Not implemented; the PPGTT model can use DMA-backed page-table storage, and the QEMU test includes a page-table DMA copy check, but there is no hardware publication, invalidation, or VM activation, and i915 owns hardware mappings. |
 | 4 | Independent submission | IDW submits and completes commands without i915 graphics execution. | Not implemented. |
 | 5 | Scheduler | Multiple contexts, queues, timeout and recovery. | Not implemented independently. |
 | 6 | UMD | Real shader compilation and rendering. | Not implemented. |
@@ -82,8 +82,9 @@ PPGTT and independent GPU ownership are not implemented.
 | i915-assisted integrated memory manager | implemented and hardware-tested; i915-owned | `I915AssistedMemoryBackend` connects managed backing, pin/bind, command submission, wait/quiesce, CPU dword access, context-destroy unbind, and GEM cleanup through public i915 ioctls. `make gpu-memory-manager-test` completed three resource lifecycles at `0x10000000`, `0x10001000`, and `0x10002000`. `make gpu-resource-write-test` passed on Haswell `8086:0412`: GPU VA `0x10000010`, initial value `0x13579bdf`, submitted value/readback `0x2468ace0`. Simulated tests cover malformed command encoding, bounds, failed exec/wait/readback, retained submission references, quiescence, and cleanup. i915 owns backing, mapping, PPGTT, translation, execution and scheduling; native DMA and IDW PPGTT remain unimplemented. |
 | GPU-VA interval allocator | CPU-only software model implemented | `src/gpuva_model.c` supports bounded first-fit allocation, alignment, guards, fixed reservations, overlap rejection, and release. It does not own allocations/backing, residency, map references, or hardware GPU addresses. |
 | Haswell Gen7.5 PPGTT CPU model | software table model implemented; physical/hardware validation not run | `src/haswell_ppgtt_model.c` builds 512 PDE slots with 1024-entry/4 KiB PTE tables, uses the upstream Gen6/7 address transform and valid bits with Haswell uncached policy, supports checked map/unmap and software translation, rolls back on allocation/duplicate table-DMA failures, defers empty-table reclamation until matching invalidation acknowledgement, coalesces dirty ranges by generation, and poisons submission checks after invalidation failure. Synthetic DMA addresses and CPU translation are software tests only. |
-| Page-table memory backend boundary | contracts implemented; provider passed virtual DMA validation | `page_table_memory.h` tags page/mapping addresses with device-generation scope and lifetime cookies. The separate internal `idw_dma_memory` provider uses `dma_alloc_coherent` only for an exclusively IDW-driver-bound PCI device, enforces 40-bit DMA range/alignment, and tracks page cookies; it is not wired into the PPGTT contract. `kernel/idw_edu_dma_test.c` bound to QEMU EDU (`1234:11e8`) and completed 32 verified 4 KiB DMA read/write round trips, rejected invalid descriptors and mask/owner cases, and freed an outstanding provider page during PCI remove. The run used QEMU 11.1.3 TCG, not KVM; it validates the virtual DMA path only, not physical Haswell DMA. |
-| Haswell hardware PPGTT | not implemented | No device DMA mapping, DMA synchronization, hardware page-table publication, GPU TLB invalidation, context activation, MMIO, independent page walk, or physical GPU test. i915 remains the owner. |
+| Page-table memory backend boundary | contracts implemented; provider passed virtual DMA validation | `page_table_memory.h` tags page/mapping addresses with device-generation scope and lifetime cookies. The separate internal `idw_dma_memory` provider uses `dma_alloc_coherent` only for an exclusively IDW-driver-bound PCI device, enforces 40-bit DMA range/alignment, and tracks page cookies. `kernel/idw_edu_dma_test_main.c` bound to QEMU EDU (`1234:11e8`), completed 32 verified 4 KiB DMA read/write round trips, rejected invalid descriptors and mask/owner cases, and freed an outstanding provider page during PCI remove. The run used QEMU 11.1.3 TCG, not KVM; it validates the virtual DMA path only, not physical Haswell DMA. |
+| DMA-backed page-table storage adapter | software implementation; virtual DMA evidence | `src/pt_dma_adapter.c` wraps an injectable DMA page provider, validates zeroed 4 KiB coherent/streaming pages, 40-bit alignment, device/generation scope, cookies, and outstanding-page cleanup, and exposes page-table-only memory/PPGTT ops. `IDW_PT_BACKEND_PAGE_TABLE_ONLY` is rejected by the complete native contract. `make pt-dma-adapter-test` covers validation, provider-failure rollback, synchronization, cleanup, and PPGTT table allocation/free with a simulated provider. The QEMU EDU probe now copies a populated Gen7.5 page table through device DMA and verifies its layout. This is storage and virtual-DMA evidence only: no resource mapping, invalidation, VM activation, MMIO, or hardware page walk. |
+| Haswell hardware PPGTT | not implemented | No hardware page-table publication, GPU TLB invalidation, context activation, MMIO, independent page walk, or physical GPU test. The software model can now allocate page-table pages from the DMA storage adapter, but i915 remains the hardware owner. |
 | X: IDW command/fence translation | not implemented | The i915-assisted manager tracks internal submission tickets through completion, but IDW does not yet translate DXGKRNL-style submissions or expose a hardware-independent fence timeline. |
 | P/Q: DRM/KMS integration | research / existing Linux dependency | Uses i915 DRM UAPI for safe observation and GEM smoke test. |
 | R/S/T: WDDM/UMD/WSL2 study | research | No Windows `.sys` loading or UMD execution. |
@@ -138,3 +139,24 @@ The eight-stage sequence near the beginning of this document supersedes the
 earlier seven-item roadmap. Stage 1 is complete only for i915-assisted resource
 read/write. It does not complete independent GPU memory management, native DMA,
 hardware PPGTT, or GPU ownership.
+
+
+## 1.1.0 — DMA-backed page-table storage adapter
+
+`idw_pt_dma_adapter` connects an injectable DMA page provider to the Haswell
+Gen7.5 software page-table model. It allocates and validates zeroed 4 KiB pages,
+checks 40-bit DMA range and alignment, enforces device/generation scope and
+allocation cookies, zeroes pages before use, synchronizes page tables for the
+device, and requires explicit release of every page before teardown. It
+advertises the explicit `IDW_PT_BACKEND_PAGE_TABLE_ONLY` profile, which the
+complete native contract rejects.
+
+The kernel binding `kernel/idw_dma_pt_adapter.c` supplies those pages from the
+existing ownership-checked `idw_dma_memory` provider using `dma_alloc_coherent`
+and DMA synchronization. The QEMU EDU test now includes a check that copies a
+populated 4 KiB page table to a second DMA page and verifies the exact bytes
+and Gen7.5 PTE layout after device-side DMA. That updated probe has not yet
+been rerun in QEMU. The check is page-table storage visibility through QEMU's
+virtual PCI DMA model, not Haswell PPGTT. There is still no resource mapping,
+GPU TLB invalidation, VM activation, MMIO, hardware page walk, or independent
+GPU ownership.

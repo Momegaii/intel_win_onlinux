@@ -10,7 +10,8 @@ The register and transfer behavior follows the
 
 The guest PCI driver binds only to EDU. It sets 40-bit streaming/coherent DMA
 masks, initializes the IDW provider with the bound PCI device and its own
-module identity, exercises owner/mask/descriptor rejection, performs 32
+module identity, exercises owner/mask/descriptor rejection, copies a populated
+Gen7.5 page table through EDU and verifies its exact layout, performs 32
 device-side read-then-write round trips through coherent pages, checks exact
 CPU readback, and leaves one allocation outstanding for PCI remove/provider
 teardown to free. DMA write/read barriers surround the coherent-buffer
@@ -51,8 +52,9 @@ Host KVM support is not required, although TCG execution is slower.
 ## Evidence boundary
 
 A successful run must show the `IDW_QEMU_DMA: PASS` serial marker and QEMU
-debug-exit status 33. The guest log must also report verified DMA cycles and
-that remove freed an outstanding provider page. The guest init process emits
+debug-exit status 33. The guest log must also report verified page-table DMA
+layout visibility, verified DMA cycles, and that remove freed an outstanding
+provider page. The guest init process emits
 the final pass marker and debug-exit signal only after the driver-unload
 syscall returns. Compilation, software tests,
 or a QEMU boot without those signals are not a pass. Even a successful QEMU

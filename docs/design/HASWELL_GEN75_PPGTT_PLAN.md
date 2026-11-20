@@ -3,12 +3,15 @@
 Status: **CPU-only GPU-VA allocator and Gen7.5 PPGTT software model implemented;
 hardware backend remains unimplemented**. A backend-neutral page-table-memory
 contract binds DMA addresses and page allocations to a device scope; the CPU
-model rejects mismatched scopes. The i915-assisted profile advertises only the
-current GEM/context validation surface and is explicitly rejected for
-DMA-backed PPGTT. A structural contract for a future exclusive-owner DMA
-backend is compile- and unit-tested, but has no hardware implementation. No
-real DMA mapping, device synchronization, hardware page-table publication, GPU
-invalidation, or GPU-side translation has been performed.
+model rejects mismatched scopes. A storage-only adapter now connects a kernel
+DMA provider to the model under `IDW_PT_BACKEND_PAGE_TABLE_ONLY`; the QEMU EDU
+probe copies a populated 4 KiB page table through virtual device DMA and checks
+the exact layout. The i915-assisted profile advertises only the current
+GEM/context validation surface and is explicitly rejected for DMA-backed
+PPGTT. A structural contract for a future exclusive-owner DMA backend is
+compile- and unit-tested, but has no hardware implementation. No hardware
+page-table publication, GPU invalidation, VM activation, or GPU-side
+translation has been performed.
 
 ## Independence-first target
 
@@ -64,8 +67,8 @@ complete because its interface or a CPU-only model compiles.
 | Stage | Milestone | Proof required | Current status |
 |---|---|---|---|
 | 1 | GPU resource read/write | GPU writes data into a managed resource; CPU reads back the exact result. | Passed on Haswell `8086:0412` through i915: wrote `0x2468ace0` at offset 16 and verified exact CPU readback. This is not independent execution. |
-| 2 | Native DMA | IDW allocates and maps real DMA memory for its exclusively owned PCI device. | In progress: an ownership-checked `dma_alloc_coherent` page provider compiles and tracks device generation/allocation cookies; no real IDW-owned device has called it. Existing page-table tests still use synthetic descriptors. |
-| 3 | Hardware PPGTT | GPU uses IDW-created Haswell Gen7.5 page tables. | Not implemented; the existing model is CPU-only, and i915 owns hardware page tables. |
+| 2 | Native DMA | IDW allocates and maps real DMA memory for its exclusively owned PCI device. | In progress: an ownership-checked `dma_alloc_coherent` page provider compiles and tracks device generation/allocation cookies. The QEMU EDU probe includes page-table page allocation and a device-visible layout copy check; the updated probe has not yet been rerun. Physical IDW-owned DMA remains unproven, and userspace model tests still use synthetic descriptors. |
+| 3 | Hardware PPGTT | GPU uses IDW-created Haswell Gen7.5 page tables. | Not implemented; the software model can use DMA-backed page-table storage, and the QEMU probe includes a page-table DMA copy check, but there is no hardware publication, invalidation, or VM activation, and i915 owns hardware page tables. |
 | 4 | Independent submission | IDW submits and completes commands without i915 graphics execution. | Not implemented. |
 | 5 | Scheduler | Multiple contexts, queues, timeout and recovery. | Not implemented independently. |
 | 6 | UMD | Real shader compilation and rendering. | Not implemented. |
@@ -174,7 +177,11 @@ generic table writer issue undocumented MMIO.
 
 The CPU-only software APIs live in `include/idw/gpuva_model.h` and
 `include/idw/haswell_ppgtt_model.h`, with implementations in `src/`. Their page
-provider callback is a test/software seam. The current test allocator assigns
+provider callback is a test/software seam. `include/idw/pt_dma_adapter.h` and
+`src/pt_dma_adapter.c` implement a storage-only adapter over an injectable DMA
+provider, including scope/alignment/cookie validation, zeroing, synchronization,
+rollback, and explicit teardown. `kernel/idw_dma_pt_adapter.c` binds it to the
+ownership-checked kernel provider. The userspace test allocator still assigns
 synthetic DMA addresses, which must never be treated as a device DMA mapping.
 
 ## Required tests and gates
@@ -182,10 +189,15 @@ synthetic DMA addresses, which must never be treated as a device DMA mapping.
 1. **CPU-only model:** implemented and tested for compile-time geometry;
    PTE/PDE index boundary vectors; VA zero/end/bounds tests; overlap and guard
    tests; map/unmap round trips; multi-PDE mappings; allocation-failure rollback;
-   deferred table reclamation; invalidation generation and poison state. Access
-   permission, allocation-refcount, and concurrent lifecycle tests remain.
+   deferred table reclamation; invalidation generation and poison state. A
+   storage adapter test covers provider validation, allocation rollback,
+   synchronization, cleanup, and PPGTT table allocation/free. Access permission,
+   allocation-refcount, and concurrent lifecycle tests remain.
 2. **Failure injection:** fail each page allocation, DMA map, synchronization,
    entry publication, invalidation, activation, rollback and teardown point.
+   The storage adapter covers allocation, scope, range, cookie, and sync
+   failures; hardware publication, invalidation, and activation injection
+   remain.
    Verify there is no success-shaped fallback, leaked backing, double unmap, or
    freed page table still reachable by hardware.
 3. **Concurrency:** map/unmap/destroy versus submit/close, lockdep and KASAN,

@@ -8,7 +8,7 @@ BUILD := build
 BIN := $(BUILD)/idwctl
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
-.PHONY: all clean test contract-test backend-contract-test i915-resource-test i915-memory-backend-test gpu-submission-test memory-manager-test abi-test ppgtt-model-test cli-test gpu-test gpu-resource-test gpu-memory-test gpu-memory-manager-test gpu-resource-write-test qemu-dma-test install-user install-system-helper kernel kernel-clean
+.PHONY: all clean test contract-test backend-contract-test i915-resource-test i915-memory-backend-test gpu-submission-test memory-manager-test abi-test ppgtt-model-test pt-dma-adapter-test cli-test gpu-test gpu-resource-test gpu-memory-test gpu-memory-manager-test gpu-resource-write-test qemu-dma-test install-user install-system-helper kernel kernel-clean
 all: $(BIN)
 $(BUILD)/gpuva_model.o: src/gpuva_model.c include/idw/gpuva_model.h \
 		include/idw/contracts/base.h
@@ -73,9 +73,17 @@ ppgtt-model-test:
 		tests/ppgtt-model-test.c \
 		-o build/ppgtt-model-test
 	./build/ppgtt-model-test
+pt-dma-adapter-test:
+	@mkdir -p $(BUILD)
+	$(CC) -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+		src/gpuva_model.c src/page_table_memory.c src/haswell_ppgtt_model.c \
+		src/pt_dma_adapter.c src/native_dma_contract.c \
+		tests/pt-dma-adapter-test.c \
+		-o build/pt-dma-adapter-test
+	./build/pt-dma-adapter-test
 cli-test: all
 	./tests/cli-arguments-smoke.sh
-test: all contract-test backend-contract-test i915-resource-test i915-memory-backend-test gpu-submission-test memory-manager-test abi-test ppgtt-model-test cli-test
+test: all contract-test backend-contract-test i915-resource-test i915-memory-backend-test gpu-submission-test memory-manager-test abi-test ppgtt-model-test pt-dma-adapter-test cli-test
 	./tests/smoke.sh
 	./tests/gem-resource-backend-smoke.sh
 	./tests/kernel-query-smoke.sh

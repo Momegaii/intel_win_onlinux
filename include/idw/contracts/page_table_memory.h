@@ -13,7 +13,13 @@ enum idw_pt_backend_kind {
 };
 
 enum idw_pt_backend_flags {
-    IDW_PT_BACKEND_EXCLUSIVE_DEVICE_OWNER = 1u << 0
+    IDW_PT_BACKEND_EXCLUSIVE_DEVICE_OWNER = 1u << 0,
+    /*
+     * Explicit partial backend profile: DMA-backed page-table storage only.
+     * It must not advertise resource mapping, invalidation, or VM activation.
+     * A complete native backend omits this flag.
+     */
+    IDW_PT_BACKEND_PAGE_TABLE_ONLY = 1u << 1
 };
 
 enum idw_pt_backend_capabilities {

@@ -11,8 +11,6 @@
 /* Upstream Gen6/7 intel_gtt.h defines HSW_PTE_UNCACHED as zero. */
 #define HSW_PTE_UNCACHED 0u
 #define HSW_DMA_LIMIT (1ULL << IDW_HSW_PPGTT_DMA_ADDRESS_BITS)
-#define HSW_PTE_ADDRESS_LOW_MASK 0xfffff000u
-#define HSW_PTE_ADDRESS_HIGH_MASK 0x00000ff0u
 
 struct idw_hsw_pt {
     struct idw_dma_page page;
@@ -56,17 +54,6 @@ static int dma_address_valid(uint64_t address)
     return 0;
 }
 
-static uint32_t encode_address(uint64_t address)
-{
-    return (uint32_t)address | (uint32_t)((address >> 28) & 0xff0u);
-}
-
-static uint64_t decode_address(uint32_t entry)
-{
-    return (uint64_t)(entry & HSW_PTE_ADDRESS_LOW_MASK) |
-           ((uint64_t)(entry & HSW_PTE_ADDRESS_HIGH_MASK) << 28);
-}
-
 static bool pt_empty(const struct idw_hsw_pt *table)
 {
     const uint32_t *ptes = table->page.cpu_address;
@@ -89,7 +76,8 @@ static int allocate_table(struct idw_hsw_ppgtt_model *model,
     if (!table)
         return -ENOMEM;
     table->page.size = sizeof(table->page);
-    ret = model->page_ops.alloc_page(model->page_ops.context, &table->page);
+    ret = model->page_ops.alloc_page_table_page(model->page_ops.context,
+                                                &table->page);
     if (ret) {
         free(table);
         return ret < 0 ? ret : -EIO;
@@ -100,23 +88,27 @@ static int allocate_table(struct idw_hsw_ppgtt_model *model,
         ((uintptr_t)table->page.cpu_address &
          (IDW_HASWELL_PPGTT_PAGE_SIZE - 1)) ||
         dma_address_valid(table->page.dma_address)) {
-        model->page_ops.free_page(model->page_ops.context, &table->page);
+        model->page_ops.free_page_table_page(model->page_ops.context,
+                                             &table->page);
         free(table);
         return -EINVAL;
     }
     if (!idw_pt_scope_equal(&model->page_ops.scope, &table->page.scope)) {
-        model->page_ops.free_page(model->page_ops.context, &table->page);
+        model->page_ops.free_page_table_page(model->page_ops.context,
+                                             &table->page);
         free(table);
         return -EXDEV;
     }
     if (table->page.memory_type != IDW_PT_PAGE_COHERENT &&
         table->page.memory_type != IDW_PT_PAGE_STREAMING) {
-        model->page_ops.free_page(model->page_ops.context, &table->page);
+        model->page_ops.free_page_table_page(model->page_ops.context,
+                                             &table->page);
         free(table);
         return -EINVAL;
     }
     if (!table->page.allocation_cookie) {
-        model->page_ops.free_page(model->page_ops.context, &table->page);
+        model->page_ops.free_page_table_page(model->page_ops.context,
+                                             &table->page);
         free(table);
         return -EINVAL;
     }
@@ -130,7 +122,8 @@ static void free_table(struct idw_hsw_ppgtt_model *model,
 {
     if (!table)
         return;
-    model->page_ops.free_page(model->page_ops.context, &table->page);
+    model->page_ops.free_page_table_page(model->page_ops.context,
+                                         &table->page);
     free(table);
 }
 
@@ -198,8 +191,8 @@ int idw_hsw_ppgtt_model_create(
         return -EINVAL;
     *out = NULL;
     if (!page_ops || page_ops->size != sizeof(*page_ops) ||
-        page_ops->version != 1 || !page_ops->alloc_page ||
-        !page_ops->free_page || !page_ops->scope.device_cookie ||
+        page_ops->version != 1 || !page_ops->alloc_page_table_page ||
+        !page_ops->free_page_table_page || !page_ops->scope.device_cookie ||
         !page_ops->scope.generation)
         return -EINVAL;
     model = calloc(1, sizeof(*model));
@@ -294,7 +287,8 @@ int idw_hsw_ppgtt_map(struct idw_hsw_ppgtt_model *model,
         uint32_t index = staged[i].index;
         model->tables[index] = staged[i].table;
         model->directory[index] =
-            encode_address(staged[i].table->page.dma_address) | HSW_PDE_VALID;
+            idw_hsw_ppgtt_encode_address(
+                staged[i].table->page.dma_address) | HSW_PDE_VALID;
         staged[i].table = NULL;
     }
     for (i = 0; i < page_count; ++i) {
@@ -302,7 +296,7 @@ int idw_hsw_ppgtt_map(struct idw_hsw_ppgtt_model *model,
         uint32_t pde = (uint32_t)(page_va >> IDW_HASWELL_PPGTT_PDE_SHIFT);
         uint32_t pte = (uint32_t)((page_va >> 12) & 0x3ffu);
         ((uint32_t *)model->tables[pde]->page.cpu_address)[pte] =
-            encode_address(dma_pages[i].dma_address) |
+            idw_hsw_ppgtt_encode_address(dma_pages[i].dma_address) |
             HSW_PTE_UNCACHED | HSW_PTE_VALID;
     }
     ret = mark_dirty(model, va, bytes);
@@ -425,7 +419,7 @@ int idw_hsw_ppgtt_translate(const struct idw_hsw_ppgtt_model *model,
     translation->pte_index = pte;
     translation->pde = model->directory[pde];
     translation->pte = entry;
-    translation->dma_address = decode_address(entry) |
+    translation->dma_address = idw_hsw_ppgtt_decode_address(entry) |
                                (va & (IDW_HASWELL_PPGTT_PAGE_SIZE - 1));
     return 0;
 }
