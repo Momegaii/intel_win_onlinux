@@ -311,13 +311,32 @@ static int idw_edu_test_pt_storage(struct idw_edu_test *test)
 
 	ptes = table.cpu_address;
 	for (i = 0; i < IDW_HASWELL_PPGTT_PTES_PER_TABLE; i++) {
-		u64 dma = 0xab00000000ULL +
+		u64 dma = 0x2b00000000ULL +
 			  (u64)i * IDW_HASWELL_PPGTT_PAGE_SIZE;
+		u32 entry;
 
-		ptes[i] = idw_hsw_ppgtt_encode_address(dma) | 1u;
+		ret = idw_hsw_ppgtt_encode_pte(dma,
+					       IDW_HSW_PPGTT_PTE_CACHE_UC,
+					       &entry);
+		if (ret)
+			goto free_table;
+		ptes[i] = entry;
 	}
 	first = ptes[0];
 	last = ptes[IDW_HASWELL_PPGTT_PTES_PER_TABLE - 1];
+	if (first != 0x000002b1u || last != 0x003ff2b1u) {
+		ret = -EIO;
+		goto free_table;
+	}
+	{
+		u32 cache_entry;
+
+		ret = idw_hsw_ppgtt_encode_pte(0, 0x8, &cache_entry);
+		if (ret || cache_entry != 0x00000801u) {
+			ret = -EIO;
+			goto free_table;
+		}
+	}
 
 	idw_dma_pt_adapter_memory_ops(&test->pt_adapter, &memory);
 	ret = memory.sync_page_table_for_device(

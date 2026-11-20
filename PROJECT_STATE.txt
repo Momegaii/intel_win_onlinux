@@ -3,23 +3,41 @@ Version: 0.5.0-resource-lifecycle
 Target: Intel HD Graphics 4600 / Haswell GT2 / PCI 8086:0412
 Host driver ownership: i915
 
+2026-11-20 corrected Haswell Gen7.5 PPGTT model:
+Implemented separate PDE and PTE encoders. PDEs carry page-table address bits
+39:32 at bits 11:4 and accept page tables below 2^40. PTEs carry page address
+bits 38:32 at bits 10:4 and cacheability bit 3 at bit 11; mapped pages are
+limited to 2^39. Reserved PDE bits and the 32 KiB page-size bit are rejected.
+Added a GGTT-resident directory provider with GTTADDR PDE write/read, flush,
+and release callbacks. The model keeps a separate CPU shadow. Unmap keeps the
+PDE valid; quiesced reclaim points it at a zeroed scratch table, and the old
+table is freed only after the next invalidation completes. PDE publication and
+reclamation are rejected while active; invalidation failure still poisons the
+VM. Hand-derived golden vectors, ASan/UBSan, contract/adapter/memory-manager
+tests, GCC W=1 kernel builds, and a corrected QEMU EDU page-table run passed.
+No hardware state was changed. i915 remains bound and is the physical GPU
+owner. Stage 3 remains NOT IMPLEMENTED: there is no real GGTT allocator, MMIO
+GTTADDR path, register-level invalidation, VM activation, or physical page-walk
+evidence. Details: docs/design/HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md.
+
 2026-11-20 physical Haswell PPGTT readiness audit:
 Audited the Gen7.5 PPGTT model and DMA storage adapter against the Intel
 Haswell PRM (Memory Views; Command Reference: Registers) and Linux v6.12 i915.
-The audit confirms the two-level 4 KiB/1024-PTE/512-PDE geometry but found
-four physical blockers: PDE and PTE address encodings differ (PDE bits 11:4 are
+The audit confirmed the two-level 4 KiB/1024-PTE/512-PDE geometry and found
+four CPU-model blockers: PDE and PTE address encodings differ (PDE bits 11:4 are
 address 39:32; PTE bits 10:4 are address 38:32 and bit 11 is cacheability);
 mapped pages are limited to 39-bit addresses while page tables may be 40-bit;
 the page directory must reside in the GGTT and be written through GTTADDR; and
 live PDE removal is unsafe because the hardware caches directory entries.
+Those software findings are corrected in the newer model entry above.
 Register-level activation/invalidation (`PP_DCLV`, `PP_DIR_BASE`, per-engine
-PPGTT enable, `INSTPM` TLB invalidate/sync flush, GGTT flush) is absent and all
-involved registers remain i915-owned. No hardware state was changed, i915 was
-not unbound, and no physical page walk is claimed. The evidence-separated plan
-and minimal reversible experiment are in
+PPGTT enable, `INSTPM` TLB invalidate/sync flush, GGTT flush) remains absent and
+all involved registers remain i915-owned. No hardware state was changed, i915
+was not unbound, and no physical page walk is claimed. The evidence-separated
+plan and minimal reversible experiment are in
 `docs/design/HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md`. Stage 3 remains NOT
-IMPLEMENTED; the next gate is review and correction of the software model,
-not a hardware run.
+IMPLEMENTED; the next gate is exclusive-ownership and real GGTT/MMIO work, not
+a hardware run.
 
 2026-11-20: `I915AssistedMemoryBackend` now connects the integrated memory
 manager to public i915 GEM/context/execbuffer/wait ioctls. The explicit
@@ -61,8 +79,8 @@ UAPI 0.4 adds opt-in page-aligned, zeroed kernel system-memory allocations with 
 
 Current eight-stage development sequence and evidence:
 1. GPU resource read/write — COMPLETE for the i915-assisted path. On Haswell `8086:0412`, a Gen7.5 `MI_STORE_DATA_IMM` command wrote `0x2468ace0` at resource offset 16; CPU PREAD returned the exact value after GEM_WAIT. This does not establish IDW-owned execution.
-2. Native DMA — IN PROGRESS. The QEMU EDU (`1234:11e8`) guest test passed under QEMU 11.1.3 TCG: 32 exact 4 KiB device-side DMA read/write round trips, owner/mask/descriptor rejection, and provider cleanup of an outstanding page during PCI remove. A second QEMU EDU run on QEMU 10.0.13 TCG with a Debian 6.12.117 guest passed page-table DMA layout verification and the full 32-cycle/remove sequence. Serial logs are preserved at `tests/qemu-dma/evidence-2026-11-20-tcg.log` and `tests/qemu-dma/evidence-2026-11-20-tcg-page-table.log`. This proves the Linux provider against QEMU's virtual PCI DMA implementation only. Physical Haswell DMA remains unproven and i915 remains bound. Required next proof: real DMA allocation/map/cleanup on an exclusively IDW-owned physical device.
-3. Hardware PPGTT — NOT IMPLEMENTED. Required proof: the GPU uses IDW-created Haswell Gen7.5 page tables.
+2. Native DMA — IN PROGRESS. The QEMU EDU (`1234:11e8`) guest test passed under QEMU 11.1.3 TCG: 32 exact 4 KiB device-side DMA read/write round trips, owner/mask/descriptor rejection, and provider cleanup of an outstanding page during PCI remove. A second QEMU EDU run on QEMU 10.0.13 TCG with a Debian 6.12.117 guest passed page-table DMA layout verification and the full 32-cycle/remove sequence. Serial logs are preserved at `tests/qemu-dma/evidence-2026-11-20-tcg.log` and `tests/qemu-dma/evidence-2026-11-20-tcg-page-table-corrected.log`. This proves the Linux provider against QEMU's virtual PCI DMA implementation only. Physical Haswell DMA remains unproven and i915 remains bound. Required next proof: real DMA allocation/map/cleanup on an exclusively IDW-owned physical device.
+3. Hardware PPGTT — NOT IMPLEMENTED. The CPU model now has separate 40-bit PDE/39-bit PTE encoders, GGTT-resident directory modeling with GTTADDR writes, active/quiesced PDE-publication rules, and scratch-table retention. Required proof remains: the GPU uses IDW-created Haswell Gen7.5 page tables through a real GGTT allocator, MMIO path, invalidation, and VM activation.
 4. Independent submission — NOT IMPLEMENTED. Required proof: IDW submits and completes commands without i915 graphics execution.
 5. Scheduler — NOT IMPLEMENTED. Required proof: multiple contexts, queues, timeout handling and recovery.
 6. UMD — NOT IMPLEMENTED. Required proof: real shader compilation and rendering.
@@ -75,7 +93,7 @@ Hardware validation status at this historical checkpoint: `gpu-memory-test` had 
 
 Added `docs/design/HASWELL_GEN75_PPGTT_PLAN.md` as the independence-first implementation plan with phase gates, Gen7.5 reference geometry, backend DMA/PPGTT contracts, rollback requirements, and staged validation. Added compile-checked `include/idw/contracts/haswell_ppgtt.h`.
 
-Implemented CPU-only GPU-VA interval allocation in `src/gpuva_model.c` and a Gen7.5 two-level PPGTT software model in `src/haswell_ppgtt_model.c`. `make ppgtt-model-test` verifies address-space geometry, golden 32-bit PTE/PDE address encoding and valid bits, translation, cross-PDE mapping, malformed-map rejection, allocation and duplicate-table-address rollback, atomic unmap rejection, invalidation range/generation tracking, deferred page-table reclamation, and poison-on-invalidation-failure. `make all`, `make contract-test`, `make abi-test`, `make ppgtt-model-test`, and an AddressSanitizer/UndefinedBehaviorSanitizer run passed. Test DMA addresses are synthetic. No VidMm, device DMA mapping/synchronization, hardware PTE publication, GPU invalidation, context activation, MMIO, or independent hardware page walk is implemented. Physical GPU PPGTT validation remains unrun; i915 remains the GPU owner.
+Implemented CPU-only GPU-VA interval allocation in `src/gpuva_model.c` and a Gen7.5 two-level PPGTT software model in `src/haswell_ppgtt_model.c`. The model was later corrected for separate PDE/PTE encodings, 40-bit/39-bit limits, GGTT-resident directory modeling, and scratch-table reclamation. `make ppgtt-model-test` verifies address-space geometry, hand-derived PDE/PTE golden vectors, translation, cross-PDE mapping, malformed-map rejection, allocation and duplicate-table-address rollback, atomic unmap rejection, invalidation range/generation tracking, active-PDE rejection, deferred scratch-table reclamation, and poison-on-invalidation-failure. `make all`, `make contract-test`, `make abi-test`, `make ppgtt-model-test`, and an AddressSanitizer/UndefinedBehaviorSanitizer run passed. Test DMA addresses are synthetic. No VidMm, device DMA mapping/synchronization, hardware PTE publication, GPU invalidation, context activation, MMIO, or independent hardware page walk is implemented. Physical GPU PPGTT validation remains unrun; i915 remains the GPU owner.
 
 2026-11-20 source audit checkpoint: fixed strict decimal CLI parsing so trailing characters, negative values, and values that overflow `unsigned` are rejected before device access; added CLI regression coverage. Added the UAPI header as an `idwctl` build dependency. Fixed the bounded NT-inspired Unicode scan condition, used `compat_ptr_ioctl` for 32-bit ioctl pointer conversion, and removed duplicate sysfs reads in GUI fallback metrics. At this earlier checkpoint, `make test`, `make kernel`, GCC `-fanalyzer`, shell/Python syntax and GUI fallback behavior checks, and ASan/UBSan PPGTT tests passed. Generic tests did perform i915 GEM object memory round-trips, but did not yet submit GPU commands; the later execution milestone below supplies hardware evidence. `/dev/idw`-dependent checks skipped because the module was not loaded. The user-space build has only the existing `-Wpedantic` warnings from flexible/zero-length arrays in system libdrm headers.
 
@@ -119,7 +137,7 @@ cleanup, and PPGTT integration with a simulated provider. The QEMU EDU probe
 copies a populated page table to a second DMA page and verifies exact layout
 after virtual device DMA. The run passed on 2026-11-20 under QEMU 10.0.13 TCG
 with Debian kernel 6.12.117; evidence is preserved at
-`tests/qemu-dma/evidence-2026-11-20-tcg-page-table.log`. `make contract-test
+`tests/qemu-dma/evidence-2026-11-20-tcg-page-table-corrected.log`. `make contract-test
 abi-test backend-contract-test ppgtt-model-test pt-dma-adapter-test
 memory-manager-test gpu-submission-test` passed, and `make kernel CC=gcc` built
 all three modules. This is page-table storage and QEMU virtual-DMA evidence

@@ -5,8 +5,15 @@
 #include "contracts/haswell_ppgtt.h"
 #include "haswell_ppgtt_format.h"
 
+#ifndef __KERNEL__
+#include <stdbool.h>
+#endif
+
 #define IDW_HSW_PPGTT_PDES 512u
-#define IDW_HSW_PPGTT_DMA_ADDRESS_BITS 40u
+#define IDW_HSW_PPGTT_DIRECTORY_BYTES IDW_HASWELL_PPGTT_PAGE_SIZE
+#define IDW_HSW_PPGTT_DIRECTORY_ALIGN IDW_HASWELL_PPGTT_PAGE_SIZE
+#define IDW_HSW_PPGTT_DIRECTORY_RECOMMENDED_ALIGN (64u * 1024u)
+#define IDW_HSW_PPGTT_DIRECTORY_VERSION 1u
 
 struct idw_hsw_ppgtt_model;
 
@@ -20,13 +27,51 @@ struct idw_hsw_ppgtt_page_ops {
 };
 
 /*
+ * Hardware-visible page directory storage. The provider owns a 4 KiB,
+ * 4 KiB-aligned region inside the GGTT aperture. The model keeps its own CPU
+ * shadow array; it must never treat that shadow as the hardware directory.
+ * PDE writes and reads go through GTTADDR callbacks.
+ */
+struct idw_hsw_ppgtt_directory {
+    uint32_t size;
+    uint32_t version;
+    uint64_t ggtt_offset;
+    uint64_t bytes;
+    struct idw_device_scope scope;
+    uint64_t allocation_cookie;
+};
+
+struct idw_hsw_ppgtt_directory_ops {
+    uint32_t size;
+    uint32_t version;
+    struct idw_device_scope scope;
+    int (*alloc_directory)(void *context,
+                           struct idw_hsw_ppgtt_directory *directory);
+    void (*free_directory)(void *context,
+                           struct idw_hsw_ppgtt_directory *directory);
+    int (*write_pde_gttaddr)(void *context,
+                             const struct idw_hsw_ppgtt_directory *directory,
+                             uint32_t index, uint32_t pde);
+    int (*read_pde_gttaddr)(void *context,
+                            const struct idw_hsw_ppgtt_directory *directory,
+                            uint32_t index, uint32_t *pde);
+    int (*flush_gtt)(void *context,
+                     const struct idw_hsw_ppgtt_directory *directory);
+    void *context;
+};
+
+/*
  * Software model only. Callers serialize all operations. The page provider
- * supplies aligned CPU memory and a 40-bit DMA address carrying the same
- * device scope as the provider. Tests use synthetic scope/address tokens,
- * which are not hardware mappings. On success, each page must have unique CPU
- * and DMA addresses and a nonzero allocation cookie. On allocation failure,
- * the provider must release any partial allocation.
- * This model does not hold VidMm allocation references or issue invalidation.
+ * supplies aligned CPU memory and a DMA address below 2^40 for page tables.
+ * The directory provider supplies GGTT-resident storage; its scope must match
+ * the page provider. Tests use synthetic scope/address tokens, which are not
+ * hardware mappings.
+ *
+ * The model never removes a PDE on unmap. Empty page tables remain reachable
+ * until idw_hsw_ppgtt_reclaim_empty() is called with the hardware quiesced and
+ * no invalidation outstanding. Reclaim points the PDE at a zeroed scratch page
+ * table and retires the old table; the old table is freed only after the
+ * resulting invalidation completes.
  */
 struct idw_hsw_ppgtt_translation {
     uint32_t size;
@@ -47,6 +92,7 @@ struct idw_hsw_ppgtt_pending_invalidation {
 
 int idw_hsw_ppgtt_model_create(
     const struct idw_hsw_ppgtt_page_ops *page_ops,
+    const struct idw_hsw_ppgtt_directory_ops *directory_ops,
     struct idw_hsw_ppgtt_model **model);
 void idw_hsw_ppgtt_model_destroy(struct idw_hsw_ppgtt_model *model);
 int idw_hsw_ppgtt_map(struct idw_hsw_ppgtt_model *model,
@@ -66,7 +112,21 @@ int idw_hsw_ppgtt_invalidation_complete(
 int idw_hsw_ppgtt_invalidation_failed(
     struct idw_hsw_ppgtt_model *model, uint64_t generation);
 int idw_hsw_ppgtt_check_submit(const struct idw_hsw_ppgtt_model *model);
+
+/*
+ * The caller asserts hardware quiescence. Reclaim is rejected while the model
+ * is marked active or while an invalidation is outstanding.
+ */
+int idw_hsw_ppgtt_set_active(struct idw_hsw_ppgtt_model *model, bool active);
+int idw_hsw_ppgtt_is_active(const struct idw_hsw_ppgtt_model *model);
+int idw_hsw_ppgtt_reclaim_empty(struct idw_hsw_ppgtt_model *model);
+
+/* CPU shadow accessor, not a hardware read. */
 uint32_t idw_hsw_ppgtt_pde(const struct idw_hsw_ppgtt_model *model,
                            uint32_t pde_index);
+int idw_hsw_ppgtt_hardware_pde(const struct idw_hsw_ppgtt_model *model,
+                               uint32_t pde_index, uint32_t *pde);
+uint64_t idw_hsw_ppgtt_directory_ggtt_offset(
+    const struct idw_hsw_ppgtt_model *model);
 
 #endif

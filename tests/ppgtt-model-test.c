@@ -27,6 +27,7 @@
     .scope = TEST_DEVICE_SCOPE, \
     .mapping_cookie = (address) \
 }
+#define TEST_DIRECTORY_OFFSET 0x40000ULL
 
 struct fake_page_allocator {
     uint64_t next_dma;
@@ -37,6 +38,25 @@ struct fake_page_allocator {
     unsigned allocated;
     unsigned freed;
     uint64_t last_dma;
+};
+
+struct fake_directory {
+    struct idw_device_scope scope;
+    uint32_t hardware[IDW_HSW_PPGTT_PDES];
+    uint64_t ggtt_offset;
+    uint64_t cookie;
+    unsigned allocations;
+    unsigned frees;
+    unsigned writes;
+    unsigned reads;
+    unsigned flushes;
+    unsigned write_calls;
+    unsigned read_calls;
+    unsigned flush_calls;
+    unsigned write_fail_call;
+    unsigned read_fail_call;
+    unsigned flush_fail_call;
+    int allocated;
 };
 
 static int fake_alloc_page(void *context, struct idw_dma_page *page)
@@ -80,6 +100,133 @@ static void fake_free_page(void *context, struct idw_dma_page *page)
     }
 }
 
+static int fake_directory_alloc(void *context,
+                                struct idw_hsw_ppgtt_directory *directory)
+{
+    struct fake_directory *fake = context;
+
+    if (fake->allocated)
+        return -EBUSY;
+    memset(fake->hardware, 0, sizeof(fake->hardware));
+    directory->size = sizeof(*directory);
+    directory->version = IDW_HSW_PPGTT_DIRECTORY_VERSION;
+    directory->ggtt_offset = fake->ggtt_offset;
+    directory->bytes = IDW_HSW_PPGTT_DIRECTORY_BYTES;
+    directory->scope = fake->scope;
+    directory->allocation_cookie = fake->cookie;
+    fake->allocated = 1;
+    ++fake->allocations;
+    return 0;
+}
+
+static void fake_directory_free(void *context,
+                                struct idw_hsw_ppgtt_directory *directory)
+{
+    struct fake_directory *fake = context;
+
+    (void)directory;
+    if (fake->allocated) {
+        fake->allocated = 0;
+        ++fake->frees;
+    }
+}
+
+static int fake_directory_write(void *context,
+                                const struct idw_hsw_ppgtt_directory *directory,
+                                uint32_t index, uint32_t pde)
+{
+    struct fake_directory *fake = context;
+
+    (void)directory;
+    ++fake->write_calls;
+    if (fake->write_fail_call == fake->write_calls)
+        return -EIO;
+    if (index >= IDW_HSW_PPGTT_PDES)
+        return -EINVAL;
+    fake->hardware[index] = pde;
+    ++fake->writes;
+    return 0;
+}
+
+static int fake_directory_read(void *context,
+                               const struct idw_hsw_ppgtt_directory *directory,
+                               uint32_t index, uint32_t *pde)
+{
+    struct fake_directory *fake = context;
+
+    (void)directory;
+    ++fake->read_calls;
+    if (fake->read_fail_call == fake->read_calls)
+        return -EIO;
+    if (index >= IDW_HSW_PPGTT_PDES || !pde)
+        return -EINVAL;
+    *pde = fake->hardware[index];
+    ++fake->reads;
+    return 0;
+}
+
+static int fake_directory_flush(void *context,
+                                const struct idw_hsw_ppgtt_directory *directory)
+{
+    struct fake_directory *fake = context;
+
+    (void)directory;
+    ++fake->flush_calls;
+    if (fake->flush_fail_call == fake->flush_calls)
+        return -EIO;
+    ++fake->flushes;
+    return 0;
+}
+
+static void fake_directory_init(struct fake_directory *fake)
+{
+    memset(fake, 0, sizeof(*fake));
+    fake->scope = (struct idw_device_scope) TEST_DEVICE_SCOPE;
+    fake->ggtt_offset = TEST_DIRECTORY_OFFSET;
+    fake->cookie = 0x4449524543544f52ULL;
+}
+
+static void fake_ops_init(struct idw_hsw_ppgtt_page_ops *ops,
+                          struct fake_page_allocator *allocator)
+{
+    *ops = (struct idw_hsw_ppgtt_page_ops) {
+        .size = sizeof(*ops),
+        .version = 1,
+        .scope = TEST_DEVICE_SCOPE,
+        .alloc_page_table_page = fake_alloc_page,
+        .free_page_table_page = fake_free_page,
+        .context = allocator
+    };
+}
+
+static void fake_directory_ops_init(struct idw_hsw_ppgtt_directory_ops *ops,
+                                    struct fake_directory *fake)
+{
+    *ops = (struct idw_hsw_ppgtt_directory_ops) {
+        .size = sizeof(*ops),
+        .version = IDW_HSW_PPGTT_DIRECTORY_VERSION,
+        .scope = TEST_DEVICE_SCOPE,
+        .alloc_directory = fake_directory_alloc,
+        .free_directory = fake_directory_free,
+        .write_pde_gttaddr = fake_directory_write,
+        .read_pde_gttaddr = fake_directory_read,
+        .flush_gtt = fake_directory_flush,
+        .context = fake
+    };
+}
+
+static int create_model(struct idw_hsw_ppgtt_model **model,
+                        struct fake_page_allocator *allocator,
+                        struct fake_directory *fake)
+{
+    struct idw_hsw_ppgtt_page_ops page_ops;
+    struct idw_hsw_ppgtt_directory_ops directory_ops;
+
+    fake_ops_init(&page_ops, allocator);
+    fake_directory_ops_init(&directory_ops, fake);
+    return idw_hsw_ppgtt_model_create(&page_ops, &directory_ops, model);
+}
+
 static int test_gpuva_space(void)
 {
     struct idw_gpuva_space space;
@@ -108,18 +255,69 @@ static int test_gpuva_space(void)
     return 0;
 }
 
+/*
+ * These expectations are hand-derived from the PRM bit layouts, not from the
+ * encoder under test.
+ *
+ * PDE 0x12_3456_7000: address 31:12 = 0x34567000, address 39:32 = 0x12.
+ *   entry = 0x34567000 | (0x12 << 4) | valid = 0x34567121.
+ * PTE 0x7f_ffff_f000: address 31:12 = 0xfffff000, address 38:32 = 0x7f.
+ *   entry = 0xfffff000 | (0x7f << 4) | valid = 0xfffff7f1.
+ * PTE cacheability 0x8: bit 3 of the control maps to entry bit 11.
+ *   entry = 0x00000000 | 0x800 | valid = 0x00000801.
+ */
+static int test_golden_encoding(void)
+{
+    uint32_t entry = 0;
+
+    CHECK(idw_hsw_ppgtt_encode_pde(0x1234567000ULL, &entry) == 0);
+    CHECK(entry == 0x34567121u);
+    CHECK(idw_hsw_ppgtt_decode_pde(entry) == 0x1234567000ULL);
+
+    CHECK(idw_hsw_ppgtt_encode_pde(0x8000000000ULL, &entry) == 0);
+    CHECK(entry == 0x00000801u);
+    CHECK(idw_hsw_ppgtt_decode_pde(entry) == 0x8000000000ULL);
+
+    CHECK(idw_hsw_ppgtt_encode_pde(0xfffffff000ULL, &entry) == 0);
+    CHECK(entry == 0xfffffff1u);
+    CHECK(idw_hsw_ppgtt_decode_pde(entry) == 0xfffffff000ULL);
+
+    CHECK(idw_hsw_ppgtt_encode_pde(1ULL << 40, &entry) == -ERANGE);
+    CHECK(idw_hsw_ppgtt_encode_pde(0x1001ULL, &entry) == -EINVAL);
+
+    CHECK(idw_hsw_ppgtt_encode_pte(0x1234567000ULL, 0, &entry) == 0);
+    CHECK(entry == 0x34567121u);
+    CHECK(idw_hsw_ppgtt_decode_pte(entry) == 0x1234567000ULL);
+
+    CHECK(idw_hsw_ppgtt_encode_pte(0x7ffffff000ULL, 0, &entry) == 0);
+    CHECK(entry == 0xfffff7f1u);
+    CHECK(idw_hsw_ppgtt_decode_pte(entry) == 0x7ffffff000ULL);
+
+    CHECK(idw_hsw_ppgtt_encode_pte(1ULL << 39, 0, &entry) == -ERANGE);
+    CHECK(idw_hsw_ppgtt_encode_pte(0x1001ULL, 0, &entry) == -EINVAL);
+
+    CHECK(idw_hsw_ppgtt_encode_pte(0, 0x8, &entry) == 0);
+    CHECK(entry == 0x00000801u);
+    CHECK(idw_hsw_ppgtt_pte_cacheability(entry) == 0x8u);
+    CHECK(idw_hsw_ppgtt_decode_pte(entry) == 0);
+
+    CHECK(idw_hsw_ppgtt_encode_pte(0, 0xf, &entry) == 0);
+    CHECK(entry == 0x0000080fu);
+    CHECK(idw_hsw_ppgtt_pte_cacheability(entry) == 0xfu);
+    CHECK(idw_hsw_ppgtt_encode_pte(0, 0x10, &entry) == -EINVAL);
+
+    CHECK(idw_hsw_ppgtt_validate_pde_entry(0x0u) == 0);
+    CHECK(idw_hsw_ppgtt_validate_pde_entry(0x1u) == 0);
+    CHECK(idw_hsw_ppgtt_validate_pde_entry(0x4u) == -EINVAL);
+    CHECK(idw_hsw_ppgtt_validate_pde_entry(0x2u) == -EOPNOTSUPP);
+    CHECK(idw_hsw_ppgtt_validate_pte_entry(0xffffffffu) == 0);
+    return 0;
+}
+
 static int test_geometry_and_lifecycle(void)
 {
-    struct fake_page_allocator allocator = {
-        .next_dma = 0x00800000
-    };
-    struct idw_hsw_ppgtt_page_ops ops = {
-        .size = sizeof(ops),
-        .version = 1,
-        .alloc_page_table_page = fake_alloc_page,
-        .free_page_table_page = fake_free_page,
-        .context = &allocator
-    };
+    struct fake_page_allocator allocator = { .next_dma = 0x00800000 };
+    struct fake_directory fake;
     struct idw_hsw_ppgtt_model *model = NULL;
     struct idw_hsw_ppgtt_translation translation = {
         .size = sizeof(translation)
@@ -131,16 +329,23 @@ static int test_geometry_and_lifecycle(void)
     const struct idw_dma_page_mapping dma_pages[] = {
         TEST_DMA_PAGE(0x1234567000ULL), TEST_DMA_PAGE(0x2345678000ULL)
     };
+    uint32_t hardware_pde = 0;
 
-    ops.scope = (struct idw_device_scope) TEST_DEVICE_SCOPE;
-    CHECK(idw_hsw_ppgtt_encode_address(dma_pages[0].dma_address) == 0x34567120u);
-    CHECK(idw_hsw_ppgtt_encode_address(dma_pages[1].dma_address) == 0x45678230u);
-    CHECK(idw_hsw_ppgtt_model_create(&ops, &model) == 0);
+    fake_directory_init(&fake);
+    CHECK(create_model(&model, &allocator, &fake) == 0);
+    CHECK(idw_hsw_ppgtt_directory_ggtt_offset(model) == TEST_DIRECTORY_OFFSET);
+    CHECK(fake.writes == IDW_HSW_PPGTT_PDES);
+    CHECK(fake.reads == IDW_HSW_PPGTT_PDES);
+    CHECK(fake.flushes == 1);
+    CHECK(idw_hsw_ppgtt_pde(model, 0) == 0);
+    CHECK(idw_hsw_ppgtt_hardware_pde(model, 0, &hardware_pde) == 0);
+    CHECK(hardware_pde == 0);
+
     CHECK(idw_hsw_ppgtt_map(model, va, 8192, dma_pages, 2) == 0);
-    CHECK(idw_hsw_ppgtt_pde(model, 0) ==
-          idw_hsw_ppgtt_encode_address(0x00800000) + 1);
-    CHECK(idw_hsw_ppgtt_pde(model, 1) ==
-          idw_hsw_ppgtt_encode_address(0x00801000) + 1);
+    CHECK(idw_hsw_ppgtt_pde(model, 0) == 0x00800001u);
+    CHECK(idw_hsw_ppgtt_pde(model, 1) == 0x00801001u);
+    CHECK(idw_hsw_ppgtt_hardware_pde(model, 0, &hardware_pde) == 0);
+    CHECK(hardware_pde == 0x00800001u);
     CHECK(idw_hsw_ppgtt_translate(model, va, &translation) == 0);
     CHECK(translation.pde_index == 0);
     CHECK(translation.pte_index == 1023);
@@ -150,35 +355,57 @@ static int test_geometry_and_lifecycle(void)
     CHECK(translation.pde_index == 1);
     CHECK(translation.pte_index == 0);
     CHECK(translation.dma_address == dma_pages[1].dma_address + 4095);
-    CHECK(idw_hsw_ppgtt_check_submit(model) == -EAGAIN);
+    CHECK(idw_hsw_ppgtt_check_submit(model) == -ENODEV);
+    CHECK(idw_hsw_ppgtt_set_active(model, true) == -EAGAIN);
     CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
     CHECK(pending.pending == 1);
     CHECK(pending.start == va && pending.bytes == 8192);
     CHECK(idw_hsw_ppgtt_invalidation_complete(model,
                                                pending.generation - 1) == -ESTALE);
     CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == 0);
+    CHECK(idw_hsw_ppgtt_set_active(model, true) == 0);
     CHECK(idw_hsw_ppgtt_check_submit(model) == 0);
 
     CHECK(idw_hsw_ppgtt_unmap(model, va, 4096) == 0);
-    CHECK(idw_hsw_ppgtt_pde(model, 0) == 0);
+    CHECK(idw_hsw_ppgtt_pde(model, 0) == 0x00800001u);
+    CHECK(idw_hsw_ppgtt_hardware_pde(model, 0, &hardware_pde) == 0);
+    CHECK(hardware_pde == 0x00800001u);
     CHECK(allocator.freed == 0);
     CHECK(idw_hsw_ppgtt_translate(model, va, &translation) == -ENOENT);
     CHECK(idw_hsw_ppgtt_translate(model, va + 4096, &translation) == 0);
-    CHECK(idw_hsw_ppgtt_invalidation_complete(model,
-        allocator.calls + 100) == -ESTALE);
+
+    CHECK(idw_hsw_ppgtt_reclaim_empty(model) == -EBUSY);
+    CHECK(idw_hsw_ppgtt_set_active(model, false) == 0);
+    CHECK(idw_hsw_ppgtt_reclaim_empty(model) == -EAGAIN);
+    CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
+    CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == 0);
+    CHECK(idw_hsw_ppgtt_reclaim_empty(model) == 0);
+    CHECK(idw_hsw_ppgtt_pde(model, 0) != 0x00800001u);
+    CHECK(idw_hsw_ppgtt_hardware_pde(model, 0, &hardware_pde) == 0);
+    CHECK(hardware_pde == idw_hsw_ppgtt_pde(model, 0));
+    CHECK(allocator.freed == 0);
+    CHECK(idw_hsw_ppgtt_set_active(model, true) == -EAGAIN);
     CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
     CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == 0);
     CHECK(allocator.freed == 1);
+    CHECK(idw_hsw_ppgtt_set_active(model, true) == 0);
+    CHECK(idw_hsw_ppgtt_check_submit(model) == 0);
 
+    CHECK(idw_hsw_ppgtt_set_active(model, false) == 0);
     CHECK(idw_hsw_ppgtt_map(model, va, 4096, dma_pages, 1) == 0);
     CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
     CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == 0);
-    CHECK(idw_hsw_ppgtt_unmap(model, va, 8192) == 0);
+    CHECK(idw_hsw_ppgtt_unmap(model, va, 4096) == 0);
+    CHECK(idw_hsw_ppgtt_unmap(model, va + 4096, 4096) == 0);
     CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
     CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == 0);
-    CHECK(allocator.allocated == allocator.freed);
+    CHECK(idw_hsw_ppgtt_reclaim_empty(model) == 0);
+    CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
+    CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == 0);
+    CHECK(allocator.allocated == allocator.freed + 1);
     idw_hsw_ppgtt_model_destroy(model);
     CHECK(allocator.allocated == allocator.freed);
+    CHECK(fake.frees == 1 && fake.allocated == 0);
     return 0;
 }
 
@@ -188,14 +415,7 @@ static int test_invalid_maps_and_rollback(void)
         .next_dma = 0x01000000,
         .fail_call = 2
     };
-    struct idw_hsw_ppgtt_page_ops ops = {
-        .size = sizeof(ops),
-        .version = 1,
-        .scope = TEST_DEVICE_SCOPE,
-        .alloc_page_table_page = fake_alloc_page,
-        .free_page_table_page = fake_free_page,
-        .context = &allocator
-    };
+    struct fake_directory fake;
     struct idw_hsw_ppgtt_model *model = NULL;
     struct idw_hsw_ppgtt_translation translation = {
         .size = sizeof(translation)
@@ -213,6 +433,9 @@ static int test_invalid_maps_and_rollback(void)
     const struct idw_dma_page_mapping too_wide[] = {
         TEST_DMA_PAGE(1ULL << 40)
     };
+    const struct idw_dma_page_mapping bit_39[] = {
+        TEST_DMA_PAGE(1ULL << 39)
+    };
     struct idw_dma_page_mapping wrong_device[] = {
         TEST_DMA_PAGE(0x40000000)
     };
@@ -220,8 +443,9 @@ static int test_invalid_maps_and_rollback(void)
         TEST_DMA_PAGE(0x40000000)
     };
 
+    fake_directory_init(&fake);
     wrong_device[0].scope.device_cookie++;
-    CHECK(idw_hsw_ppgtt_model_create(&ops, &model) == 0);
+    CHECK(create_model(&model, &allocator, &fake) == 0);
     CHECK(idw_hsw_ppgtt_map(model, 0, 4096, NULL, 1) == -EINVAL);
     CHECK(idw_hsw_ppgtt_map(model, 1, 4096, one_page, 1) == -EINVAL);
     CHECK(idw_hsw_ppgtt_map(model, 0, 0, one_page, 1) == -EINVAL);
@@ -249,8 +473,9 @@ static int test_invalid_maps_and_rollback(void)
     CHECK(allocator.allocated == allocator.freed);
     CHECK(idw_hsw_ppgtt_pde(model, 4) == 0);
     allocator.wrong_scope_on_call = 0;
-    CHECK(idw_hsw_ppgtt_map(model, 0, 4096, bad_alignment, 1) == -ERANGE);
+    CHECK(idw_hsw_ppgtt_map(model, 0, 4096, bad_alignment, 1) == -EINVAL);
     CHECK(idw_hsw_ppgtt_map(model, 0, 4096, too_wide, 1) == -ERANGE);
+    CHECK(idw_hsw_ppgtt_map(model, 0, 4096, bit_39, 1) == -ERANGE);
     CHECK(idw_hsw_ppgtt_map(model, 0, 4096, one_page, 1) == 0);
     CHECK(idw_hsw_ppgtt_map(model, 0, 4096, one_page, 1) == -EEXIST);
     CHECK(idw_hsw_ppgtt_unmap(model, 0, 8192) == -ENOENT);
@@ -265,14 +490,7 @@ static int test_invalid_maps_and_rollback(void)
 static int test_failed_invalidation_poison(void)
 {
     struct fake_page_allocator allocator = { .next_dma = 0x02000000 };
-    struct idw_hsw_ppgtt_page_ops ops = {
-        .size = sizeof(ops),
-        .version = 1,
-        .scope = TEST_DEVICE_SCOPE,
-        .alloc_page_table_page = fake_alloc_page,
-        .free_page_table_page = fake_free_page,
-        .context = &allocator
-    };
+    struct fake_directory fake;
     struct idw_hsw_ppgtt_model *model = NULL;
     struct idw_hsw_ppgtt_pending_invalidation pending = {
         .size = sizeof(pending)
@@ -284,16 +502,19 @@ static int test_failed_invalidation_poison(void)
         TEST_DMA_PAGE(0x30000000)
     };
 
-    CHECK(idw_hsw_ppgtt_model_create(&ops, &model) == 0);
+    fake_directory_init(&fake);
+    CHECK(create_model(&model, &allocator, &fake) == 0);
     CHECK(idw_hsw_ppgtt_map(model, 0, 4096, page, 1) == 0);
     CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
     CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == 0);
     CHECK(idw_hsw_ppgtt_unmap(model, 0, 4096) == 0);
+    CHECK(idw_hsw_ppgtt_pde(model, 0) != 0);
     CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
     CHECK(idw_hsw_ppgtt_invalidation_failed(model, pending.generation) == -EIO);
     CHECK(allocator.freed == 0);
     CHECK(idw_hsw_ppgtt_check_submit(model) == -EIO);
     CHECK(idw_hsw_ppgtt_translate(model, 0, &translation) == -EIO);
+    CHECK(idw_hsw_ppgtt_reclaim_empty(model) == -EIO);
     CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == -EIO);
     idw_hsw_ppgtt_model_destroy(model);
     CHECK(allocator.allocated == allocator.freed);
@@ -303,14 +524,7 @@ static int test_failed_invalidation_poison(void)
 static int test_invalidation_generation_coalescing(void)
 {
     struct fake_page_allocator allocator = { .next_dma = 0x03000000 };
-    struct idw_hsw_ppgtt_page_ops ops = {
-        .size = sizeof(ops),
-        .version = 1,
-        .scope = TEST_DEVICE_SCOPE,
-        .alloc_page_table_page = fake_alloc_page,
-        .free_page_table_page = fake_free_page,
-        .context = &allocator
-    };
+    struct fake_directory fake;
     struct idw_hsw_ppgtt_model *model = NULL;
     struct idw_hsw_ppgtt_pending_invalidation pending = {
         .size = sizeof(pending)
@@ -323,7 +537,8 @@ static int test_invalidation_generation_coalescing(void)
     };
     uint64_t first_generation;
 
-    CHECK(idw_hsw_ppgtt_model_create(&ops, &model) == 0);
+    fake_directory_init(&fake);
+    CHECK(create_model(&model, &allocator, &fake) == 0);
     CHECK(idw_hsw_ppgtt_map(model, 0, 4096, page_a, 1) == 0);
     CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
     first_generation = pending.generation;
@@ -333,9 +548,197 @@ static int test_invalidation_generation_coalescing(void)
     CHECK(pending.start == 0);
     CHECK(pending.bytes == (8ULL << 20) + 4096);
     CHECK(idw_hsw_ppgtt_invalidation_complete(model, first_generation) == -ESTALE);
-    CHECK(idw_hsw_ppgtt_check_submit(model) == -EAGAIN);
+    CHECK(idw_hsw_ppgtt_check_submit(model) == -ENODEV);
+    CHECK(idw_hsw_ppgtt_set_active(model, true) == -EAGAIN);
     CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == 0);
+    CHECK(idw_hsw_ppgtt_set_active(model, true) == 0);
     CHECK(idw_hsw_ppgtt_check_submit(model) == 0);
+    idw_hsw_ppgtt_model_destroy(model);
+    CHECK(allocator.allocated == allocator.freed);
+    return 0;
+}
+
+static int test_directory_residency_and_writes(void)
+{
+    struct fake_page_allocator allocator = { .next_dma = 0x06000000 };
+    struct fake_directory fake;
+    struct idw_hsw_ppgtt_model *model = NULL;
+    const struct idw_dma_page_mapping page[] = {
+        TEST_DMA_PAGE(0x60000000)
+    };
+    uint32_t hardware = 0;
+
+    fake_directory_init(&fake);
+    CHECK(create_model(&model, &allocator, &fake) == 0);
+    CHECK(fake.writes == IDW_HSW_PPGTT_PDES);
+    CHECK(fake.reads == IDW_HSW_PPGTT_PDES);
+    CHECK(fake.flushes == 1);
+    CHECK(idw_hsw_ppgtt_map(model, 0, 4096, page, 1) == 0);
+    CHECK(fake.writes == IDW_HSW_PPGTT_PDES + 1);
+    CHECK(fake.flushes == 2);
+    CHECK(idw_hsw_ppgtt_pde(model, 0) == 0x06000001u);
+    CHECK(idw_hsw_ppgtt_hardware_pde(model, 0, &hardware) == 0);
+    CHECK(hardware == 0x06000001u);
+    CHECK(idw_hsw_ppgtt_hardware_pde(model, IDW_HSW_PPGTT_PDES,
+                                     &hardware) == -EINVAL);
+    CHECK(idw_hsw_ppgtt_directory_ggtt_offset(model) == TEST_DIRECTORY_OFFSET);
+    idw_hsw_ppgtt_model_destroy(model);
+    CHECK(fake.frees == 1 && fake.allocated == 0);
+    CHECK(allocator.allocated == allocator.freed);
+    return 0;
+}
+
+static int test_directory_validation(void)
+{
+    struct fake_page_allocator allocator = { .next_dma = 0x07000000 };
+    struct fake_directory fake;
+    struct idw_hsw_ppgtt_page_ops page_ops;
+    struct idw_hsw_ppgtt_directory_ops directory_ops;
+    struct idw_hsw_ppgtt_model *model = NULL;
+
+    fake_directory_init(&fake);
+    fake_ops_init(&page_ops, &allocator);
+    fake_directory_ops_init(&directory_ops, &fake);
+    CHECK(idw_hsw_ppgtt_model_create(NULL, &directory_ops, &model) == -EINVAL);
+    CHECK(idw_hsw_ppgtt_model_create(&page_ops, NULL, &model) == -EINVAL);
+    CHECK(idw_hsw_ppgtt_model_create(&page_ops, &directory_ops, NULL) ==
+          -EINVAL);
+
+    directory_ops.scope.generation++;
+    CHECK(idw_hsw_ppgtt_model_create(&page_ops, &directory_ops, &model) ==
+          -EXDEV);
+    directory_ops.scope = (struct idw_device_scope) TEST_DEVICE_SCOPE;
+
+    fake.ggtt_offset = TEST_DIRECTORY_OFFSET + 1;
+    CHECK(create_model(&model, &allocator, &fake) == -EINVAL);
+    CHECK(fake.allocations == 1 && fake.frees == 1);
+
+    fake_directory_init(&fake);
+    fake.cookie = 0;
+    CHECK(create_model(&model, &allocator, &fake) == -EINVAL);
+    CHECK(fake.allocations == 1 && fake.frees == 1);
+
+    fake_directory_init(&fake);
+    fake.read_fail_call = 1;
+    CHECK(create_model(&model, &allocator, &fake) == -EIO);
+    CHECK(fake.allocations == 1 && fake.frees == 1);
+
+    fake_directory_init(&fake);
+    fake.flush_fail_call = 1;
+    CHECK(create_model(&model, &allocator, &fake) == -EIO);
+    CHECK(fake.allocations == 1 && fake.frees == 1);
+    return 0;
+}
+
+static int test_reclaim_failure_rollback(void)
+{
+    struct fake_page_allocator allocator = { .next_dma = 0x08000000 };
+    struct fake_directory fake;
+    struct idw_hsw_ppgtt_model *model = NULL;
+    struct idw_hsw_ppgtt_pending_invalidation pending = {
+        .size = sizeof(pending)
+    };
+    const struct idw_dma_page_mapping page[] = {
+        TEST_DMA_PAGE(0x70000000)
+    };
+    uint32_t before;
+
+    fake_directory_init(&fake);
+    CHECK(create_model(&model, &allocator, &fake) == 0);
+    CHECK(idw_hsw_ppgtt_map(model, 0, 4096, page, 1) == 0);
+    CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
+    CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == 0);
+    CHECK(idw_hsw_ppgtt_unmap(model, 0, 4096) == 0);
+    CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
+    CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == 0);
+    before = idw_hsw_ppgtt_pde(model, 0);
+
+    fake.write_fail_call = fake.write_calls + 1;
+    CHECK(idw_hsw_ppgtt_reclaim_empty(model) == -EIO);
+    CHECK(idw_hsw_ppgtt_pde(model, 0) == before);
+    CHECK(idw_hsw_ppgtt_check_submit(model) == -ENODEV);
+    CHECK(idw_hsw_ppgtt_reclaim_empty(model) == 0);
+    CHECK(idw_hsw_ppgtt_pde(model, 0) != before);
+    CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
+    CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == 0);
+    idw_hsw_ppgtt_model_destroy(model);
+    CHECK(allocator.allocated == allocator.freed);
+    return 0;
+}
+
+static int test_model_address_boundaries(void)
+{
+    struct fake_page_allocator allocator = { .next_dma = 0xfffffff000ULL };
+    struct fake_directory fake;
+    struct idw_hsw_ppgtt_model *model = NULL;
+    struct idw_hsw_ppgtt_translation translation = {
+        .size = sizeof(translation)
+    };
+    const struct idw_dma_page_mapping max_page[] = {
+        TEST_DMA_PAGE(0x7ffffff000ULL)
+    };
+    const struct idw_dma_page_mapping one_page[] = {
+        TEST_DMA_PAGE(0x1000)
+    };
+
+    fake_directory_init(&fake);
+    CHECK(create_model(&model, &allocator, &fake) == 0);
+    CHECK(idw_hsw_ppgtt_map(model, 0, 4096, max_page, 1) == 0);
+    CHECK(idw_hsw_ppgtt_pde(model, 0) == 0xfffffff1u);
+    CHECK(idw_hsw_ppgtt_translate(model, 0, &translation) == 0);
+    CHECK(translation.pte == 0xfffff7f1u);
+    CHECK(translation.dma_address == 0x7ffffff000ULL);
+    idw_hsw_ppgtt_model_destroy(model);
+    CHECK(allocator.allocated == allocator.freed);
+
+    allocator.next_dma = 1ULL << 40;
+    fake_directory_init(&fake);
+    CHECK(create_model(&model, &allocator, &fake) == 0);
+    CHECK(idw_hsw_ppgtt_map(model, 0, 4096, one_page, 1) == -ERANGE);
+    CHECK(idw_hsw_ppgtt_pde(model, 0) == 0);
+    idw_hsw_ppgtt_model_destroy(model);
+    CHECK(allocator.allocated == allocator.freed);
+
+    allocator.next_dma = 0x1001;
+    fake_directory_init(&fake);
+    CHECK(create_model(&model, &allocator, &fake) == 0);
+    CHECK(idw_hsw_ppgtt_map(model, 0, 4096, one_page, 1) == -EINVAL);
+    CHECK(idw_hsw_ppgtt_pde(model, 0) == 0);
+    idw_hsw_ppgtt_model_destroy(model);
+    CHECK(allocator.allocated == allocator.freed);
+    return 0;
+}
+
+static int test_active_pde_publication_rejected(void)
+{
+    struct fake_page_allocator allocator = { .next_dma = 0x09000000 };
+    struct fake_directory fake;
+    struct idw_hsw_ppgtt_model *model = NULL;
+    struct idw_hsw_ppgtt_pending_invalidation pending = {
+        .size = sizeof(pending)
+    };
+    struct idw_hsw_ppgtt_translation translation = {
+        .size = sizeof(translation)
+    };
+    const struct idw_dma_page_mapping page_a[] = {
+        TEST_DMA_PAGE(0x90000000)
+    };
+    const struct idw_dma_page_mapping page_b[] = {
+        TEST_DMA_PAGE(0x90001000)
+    };
+
+    fake_directory_init(&fake);
+    CHECK(create_model(&model, &allocator, &fake) == 0);
+    CHECK(idw_hsw_ppgtt_map(model, 0, 4096, page_a, 1) == 0);
+    CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
+    CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == 0);
+    CHECK(idw_hsw_ppgtt_set_active(model, true) == 0);
+    CHECK(idw_hsw_ppgtt_map(model, 4ULL << 22, 4096, page_b, 1) == -EBUSY);
+    CHECK(idw_hsw_ppgtt_pde(model, 4) == 0);
+    CHECK(idw_hsw_ppgtt_map(model, 4096, 4096, page_b, 1) == 0);
+    CHECK(idw_hsw_ppgtt_translate(model, 4096, &translation) == 0);
+    CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
+    CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == 0);
     idw_hsw_ppgtt_model_destroy(model);
     CHECK(allocator.allocated == allocator.freed);
     return 0;
@@ -343,9 +746,14 @@ static int test_invalidation_generation_coalescing(void)
 
 int main(void)
 {
-    if (test_gpuva_space() || test_geometry_and_lifecycle() ||
-        test_invalid_maps_and_rollback() || test_failed_invalidation_poison() ||
-        test_invalidation_generation_coalescing())
+    if (test_gpuva_space() || test_golden_encoding() ||
+        test_geometry_and_lifecycle() || test_invalid_maps_and_rollback() ||
+        test_failed_invalidation_poison() ||
+        test_invalidation_generation_coalescing() ||
+        test_directory_residency_and_writes() ||
+        test_directory_validation() || test_reclaim_failure_rollback() ||
+        test_model_address_boundaries() ||
+        test_active_pde_publication_rejected())
         return 1;
     puts("PASS: CPU-only GPU-VA allocator and Haswell Gen7.5 PPGTT model tests");
     puts("NOTE: synthetic DMA addresses validate software structures only; no GPU mapping or hardware control was tested.");

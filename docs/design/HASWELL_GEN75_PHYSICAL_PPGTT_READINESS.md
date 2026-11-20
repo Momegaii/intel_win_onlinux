@@ -1,16 +1,17 @@
 # Haswell Gen7.5 physical PPGTT readiness
 
-Status: **documentation and design investigation complete; physical
-implementation not started.** This document records an audit of the current
-Gen7.5 PPGTT model against the Intel Haswell Programmer's Reference Manual
-(PRM) and the Linux v6.12 i915 Gen6/Gen7 implementation, defines the physical
-page-directory/page-table requirements, and specifies a minimal reversible
-page-walk experiment for a future exclusively owned device.
+Status: **software model corrected; physical implementation not started.** This
+document records an audit of the Gen7.5 PPGTT model against the Intel Haswell
+Programmer's Reference Manual (PRM) and the Linux v6.12 i915 Gen6/Gen7
+implementation, defines the physical page-directory/page-table requirements,
+and specifies a minimal reversible page-walk experiment for a future
+exclusively owned device. The CPU-side encoding, GGTT-directory, and deferred
+reclamation findings from the audit have been implemented and tested.
 
-No hardware state was changed while preparing this document. i915 remains
-bound, owns the GPU, and was not unbound. No PPGTT register was programmed, no
-page table was published to hardware, no TLB invalidation was issued, and no
-physical GPU page walk is claimed.
+No hardware state was changed while preparing this document or implementing
+the corrected model. i915 remains bound, owns the GPU, and was not unbound. No
+PPGTT register was programmed, no page table was published to hardware, no TLB
+invalidation was issued, and no physical GPU page walk is claimed.
 
 ## 1. Scope and non-goals
 
@@ -99,7 +100,7 @@ Repository references:
 - `kernel/idw_dma_pt_adapter.c`
 - `tests/ppgtt-model-test.c`
 - `tests/pt-dma-adapter-test.c`
-- `tests/qemu-dma/evidence-2026-11-20-tcg-page-table.log`
+- `tests/qemu-dma/evidence-2026-11-20-tcg-page-table-corrected.log`
 
 The i915 source is an implementation reference, not a substitute for the PRM.
 Where the PRM and i915 differ, both are recorded and the difference is treated
@@ -118,40 +119,54 @@ The current model uses the Gen6/Gen7 two-level layout:
 - Bit 0 valid in both PDEs and PTEs.
 - A 4 KiB page-table page supplied by the DMA storage adapter.
 - Device/generation scope and allocation cookies on DMA pages.
-- Deferred reclamation of empty page tables until an invalidation generation
-  is acknowledged.
+- Deferred reclamation: unmap keeps the PDE valid; quiesced reclaim points the
+  PDE at a zeroed scratch page table, and the old table is freed only after the
+  resulting invalidation generation is acknowledged.
 
 These are consistent with the PRM's "Gen6-Gen7.5 family ... 2-level mapping
 scheme" and with i915's `I915_PDES`, `GEN6_PDE_SHIFT`, and `GEN6_PTES`
 definitions. They are software/table-format facts, not a hardware page walk.
 
-### 4.2 Findings that block physical use
+### 4.2 Audit findings and software disposition
 
-| Finding | Current implementation | Authoritative requirement | Consequence |
+The audit found correctness problems in the CPU-side model. They were fixed in
+the follow-up implementation; the table records the pre-correction state and
+the disposition. None of these fixes touched hardware.
+
+| Finding | Pre-correction implementation | Authoritative requirement | Software disposition |
 |---|---|---|---|
-| PDE and PTE address encoders are shared | `idw_hsw_ppgtt_encode_address()` uses `addr | ((addr >> 28) & 0xff0)` for both PDEs and PTEs. | PRM: PDE bits 11:4 carry physical address bits 39:32. PTE bits 10:4 carry physical address bits 38:32; PTE bit 11 is cacheability control bit 3. | The PTE encoder must use `0x7f0`, not `0xff0`. For a mapped page at or above 2^39, the current code writes address bit 39 into a cacheability bit. |
-| DMA address limit is 40 bits for mapped pages | `IDW_HSW_PPGTT_DMA_ADDRESS_BITS` is 40 and `dma_address_valid()` accepts `< 2^40` for mapped pages. | PRM: Haswell repurposes PTE bit 39 for cacheability; mapped pages are limited to 39-bit physical addresses. PDEs still carry bits 39:32 and can point to page tables below 2^40. | Use separate limits: page-table DMA address `< 2^40`; mapped page DMA address `< 2^39`. |
-| Page directory is not in GGTT | The model keeps `uint32_t directory[512]` in CPU memory. | PRM: "Page directories must be located entirely within the GGTT (the table itself.)" PDEs are updated through GTTADDR; i915 pins the PD in GGTT and writes through `pd_addr`. | The model cannot publish a hardware PD. A GGTT-backed PD allocator and GTTADDR write path are missing. |
-| PDE removal is treated as ordinary unmap | `idw_hsw_ppgtt_unmap()` clears the PDE, retires the table, and frees it after invalidation acknowledgement. | PRM: directory entries should be updated only for non-active contexts; a running context caches directory entries and has no on-the-fly PDE invalidation. i915 explicitly never removes a PDE on the fly and clears PTEs to a scratch entry instead. | The model's reclamation rule is not hardware-safe. A physical implementation must keep the PDE valid and point it at a scratch page table, or destroy/recreate the context. |
-| Invalidation is only a software generation | The model tracks a dirty range and generation; `invalidation_complete()` frees retired tables. | PRM/i915 require TLB invalidate plus sync flush, and PDE updates require context-inactive rules. | The model has no register-level invalidation sequence and no PDE-cache semantics. |
-| No PPGTT activation path | The model has no `PP_DCLV`, `PP_DIR_BASE`, `RING_MODE_GEN7`, or `INSTPM` operations. | i915 programs `PP_DCLV` then `PP_DIR_BASE`, enables PPGTT per engine, and invalidates TLBs before submitting work. | VM activation and engine/context ownership are missing. |
-| Cacheability policy is only PTE UC | PTE valid plus uncached (`0`) is modeled. | PRM provides 4-bit cacheability controls; i915 also sets global `ECOCHK` PPGTT override and `GAC_ECO_BITS` for Haswell. | The PTE UC choice is valid, but the global walk/cache policy and its exact scope are not modeled or verified. |
-| Alignment is only 4 KiB for PT and pages | Adapter/model require 4 KiB alignment. | PRM: translation table base addresses are 4 KiB aligned; directory and each table fit in one 4 KiB page. i915 pins the Gen6 PD VMA with `GEN6_PD_ALIGN = 64 KiB`. | 4 KiB is the documented minimum; the PD path should conservatively meet i915's 64 KiB GGTT alignment until the hardware requirement is confirmed. |
-| 32 KiB pages are unsupported | PDE bit 1 is always zero; only 4 KiB pages are modeled. | PRM: PDE bit 1 selects 4 KiB or 32 KiB pages; a 32 KiB PDE requires the whole PT to use 32 KiB pages, eight consecutive PTEs, and 32 KiB-aligned physical pages. | This is acceptable for a first 4 KiB-only experiment, but must be rejected explicitly rather than silently mis-encoded. |
+| PDE and PTE address encoders were shared | `idw_hsw_ppgtt_encode_address()` used `addr | ((addr >> 28) & 0xff0)` for both PDEs and PTEs. | PRM: PDE bits 11:4 carry physical address bits 39:32. PTE bits 10:4 carry physical address bits 38:32; PTE bit 11 is cacheability control bit 3. | **Corrected.** Separate `idw_hsw_ppgtt_encode_pde()` and `idw_hsw_ppgtt_encode_pte()` helpers use `0xff0` and `0x7f0` respectively. Golden vectors cover upper address bits and PTE bit 11. |
+| Mapped pages accepted 40-bit addresses | `IDW_HSW_PPGTT_DMA_ADDRESS_BITS` was 40 for mapped pages. | PRM: mapped pages are limited to 39-bit physical addresses because PTE bit 39 is repurposed. PDEs still carry bits 39:32. | **Corrected.** Page tables use `< 2^40`; mapped pages use `< 2^39`. Both reject misalignment and overflow separately. |
+| Page directory was a CPU array | The model kept `uint32_t directory[512]` in CPU memory. | PRM: the directory must reside in the GGTT, and PDEs can only be modified through GTTADDR. | **Corrected in the model.** A directory provider contract supplies a GGTT-backed 4 KiB directory; the model keeps a separate CPU shadow and performs PDE writes/reads through GTTADDR callbacks. |
+| PDE removal was treated as ordinary unmap | `idw_hsw_ppgtt_unmap()` cleared the PDE, retired the table, and freed it after invalidation acknowledgement. | PRM: a running context caches directory entries and has no on-the-fly PDE invalidation. i915 keeps the PDE valid and clears PTEs to a scratch entry. | **Corrected.** Unmap keeps the PDE valid. `idw_hsw_ppgtt_reclaim_empty()` requires quiescence and no pending invalidation, points the PDE at a zeroed scratch table, and defers freeing the old table until the next invalidation completes. |
+| Invalidation was only a software generation | The model tracked a dirty range and generation. | PRM/i915 require TLB invalidate plus sync flush; PDE updates require context-inactive rules. | **Partially corrected in the model.** The model now tracks active/quiesced state and rejects PDE publication or reclamation while active. Register-level invalidation remains absent and i915-owned. |
+| No PPGTT activation path | The model has no `PP_DCLV`, `PP_DIR_BASE`, `RING_MODE_GEN7`, or `INSTPM` operations. | i915 programs `PP_DCLV` then `PP_DIR_BASE`, enables PPGTT per engine, and invalidates TLBs before submitting work. | **Unchanged; physical blocker.** VM activation and engine/context ownership are missing. |
+| Cacheability policy is only PTE UC | PTE valid plus uncached (`0`) is modeled. | PRM provides 4-bit cacheability controls; i915 also sets global `ECOCHK` PPGTT override and `GAC_ECO_BITS` for Haswell. | **Unchanged; physical blocker.** The PTE UC choice is valid, but global walk/cache policy is not modeled or verified. |
+| Alignment is only 4 KiB for PT and pages | Adapter/model require 4 KiB alignment. | PRM: translation table bases are 4 KiB aligned; i915 pins the Gen6 PD VMA with `GEN6_PD_ALIGN = 64 KiB`. | **Modeled.** Directory provider requires at least 4 KiB GGTT alignment and exposes i915's 64 KiB recommendation as a constant. The hardware requirement remains open. |
+| 32 KiB pages are unsupported | PDE bit 1 is always zero. | PRM: PDE bit 1 selects 4 KiB or 32 KiB pages. | **Rejected explicitly.** `idw_hsw_ppgtt_validate_pde_entry()` returns `-EOPNOTSUPP` for the 32 KiB bit instead of silently accepting it. |
 
-### 4.3 Audit conclusion
+### 4.3 Before/after encoding examples
 
-The software model is a useful table-format and lifetime model, but it is not a
-hardware-publication implementation. The first three blockers are correctness
-issues, not just missing features:
+| Case | Before (shared encoder) | After |
+|---|---|---|
+| PDE for page table at `0x12_3456_7000` | `0x34567121` | `0x34567121` (unchanged; PDE bits 11:4 are address bits) |
+| PTE for page at `0x12_3456_7000`, UC | `0x34567121` | `0x34567121` (unchanged below 2^39) |
+| PDE for page table at `0x80_0000_0000` | `0x00000801` | `0x00000801` (valid 40-bit page-table address) |
+| PTE for page at `0x80_0000_0000` | `0x00000801` (address bit 39 placed in cacheability bit 11) | `-ERANGE` (mapped pages must be below 2^39) |
+| PTE for page at `0`, cacheability `0x8` | `0x00000001` (cacheability ignored) | `0x00000801` (bit 3 of cacheability maps to entry bit 11) |
+| PTE for maximum page at `0x7f_ffff_f000`, UC | `0xfffff7f1` | `0xfffff7f1` |
+| PDE with reserved bit 2 set | accepted | `-EINVAL` |
+| PDE with 32 KiB page-size bit set | accepted | `-EOPNOTSUPP` |
 
-1. Split PDE and PTE encoding and enforce 39-bit mapped-page addresses.
-2. Put the page directory in GGTT and write PDEs through GTTADDR.
-3. Replace live PDE removal with scratch-page-table retention or context
-   teardown.
+### 4.4 Audit conclusion
 
-No code was changed in this investigation. These corrections belong to the
-implementation phase after review.
+The CPU-side correctness blockers are fixed: separate PDE/PTE encoders,
+distinct 40-bit/39-bit limits, GGTT-resident directory modeling with GTTADDR
+writes, and scratch-table retention with deferred reclamation. The model is
+still not a hardware-publication implementation. Remaining physical blockers
+are a real GGTT allocator and MMIO GTTADDR path, register ownership, TLB/GGTT
+invalidation, VM activation, cache-policy selection, coherency/IOMMU behavior,
+and physical evidence.
 
 ## 5. Physical page-directory and page-table requirements
 
@@ -526,47 +541,51 @@ Would not prove:
 | Gen6-Gen7.5 uses a two-level PPGTT | Yes (PRM) | Yes (model geometry) | Not modeled | Not run |
 | 4 KiB page tables, 1024 PTEs, PDE shift 22 | Yes (PRM + i915) | Yes | Page-table bytes copied | Not run |
 | 512 PDEs / 2 GiB profile | i915; PRM says 1024 entries per page | Yes | Not modeled | Not run |
-| PDE format (bits 39:32 at 11:4) | Yes (PRM) | Encoded, but shared with PTE | Bytes copied only | Not run |
-| PTE format (bits 38:32 at 10:4; bit 11 cacheability) | Yes (PRM) | Not correctly separated from PDE | Bytes copied only | Not run |
-| Mapped pages limited to 39-bit addresses | Yes (PRM) | No; model accepts 40-bit | Test addresses below 2^39, not discriminating | Not run |
-| Page directory must be in GGTT | Yes (PRM) | No; model uses CPU array | Not modeled | Not run |
+| PDE format (bits 39:32 at 11:4) | Yes (PRM) | Yes; separate PDE encoder and golden vectors | Bytes copied; independent expected values | Not run |
+| PTE format (bits 38:32 at 10:4; bit 11 cacheability) | Yes (PRM) | Yes; separate PTE encoder, cacheability vector, and golden vectors | Bytes copied; independent expected values and bit-11 vector | Not run |
+| Mapped pages limited to 39-bit addresses | Yes (PRM) | Yes; model and encoder reject `>= 2^39` | Uses a below-2^39 address | Not run |
+| Page tables may use 40-bit addresses | Yes (PRM) | Yes; model and PDE encoder reject `>= 2^40` | Not discriminating | Not run |
+| Page directory must be in GGTT | Yes (PRM) | Modeled with a directory provider and GTTADDR callbacks | Not modeled | Not run |
+| PDE writes use GTTADDR | Yes (PRM) | Yes; provider callbacks write/read back through GTTADDR | Not modeled | Not run |
+| CPU shadow is separate from hardware directory | Yes (PRM) | Yes; shadow accessor and hardware readback tested | Not modeled | Not run |
 | Page tables in non-snooped main memory | Yes (PRM) | Coherent/streaming adapter checks | Coherent EDU pages | Not run |
-| PDE updates only for non-active contexts | Yes (PRM + i915) | No; model retires PDEs | Not modeled | Not run |
-| PTE TLB invalidation via INSTPM + sync flush | Yes (PRM + i915) | Software generation only | Not modeled | Not run |
+| Live PDE removal is unsafe | Yes (PRM + i915) | Yes; unmap keeps PDE, active reclaim rejected, deferred free | Not modeled | Not run |
+| PTE TLB invalidation via INSTPM + sync flush | Yes (PRM + i915) | Software generation only; no register access | Not modeled | Not run |
 | GGTT flush via GFX_FLSH_CNTL_GEN6 | i915 | No | Not modeled | Not run |
 | ECOCHK/GAC_ECO_BITS PPGTT policy | PRM/i915 | No | Not modeled | Not run |
 | Page-walk translation of a data page | PRM | Software translation only | No | Not run |
 | Instruction fetch through PPGTT | PRM | No | No | Not run |
 
-## 10. Implementation plan after review
+## 10. Implementation plan
 
-The following is a plan, not completed work.
+### Phase A — Correct the software model and contracts (complete)
 
-### Phase A — Correct the software model and contracts
-
-- Split PDE and PTE address encoders.
-- Enforce page-table DMA addresses `< 2^40` and mapped-page DMA addresses
+- [x] Split PDE and PTE address encoders.
+- [x] Enforce page-table DMA addresses `< 2^40` and mapped-page DMA addresses
   `< 2^39`.
-- Add golden vectors for address bit 39, PTE cacheability bit 11, PDE bit 11,
-  and the 4 KiB page-size bit.
-- Add explicit rejection of 32 KiB PDEs until implemented.
-- Replace live PDE removal with scratch-page-table retention, or require
-  context teardown before freeing a page table.
-- Extend the model's invalidation state to distinguish PTE invalidation from
-  PDE/context replacement.
-- Add a page-directory-in-GGTT provider contract, including allocation,
-  GTTADDR write, flush, and release.
-- Add explicit capability bits for GGTT page directory, PDE publication, and
-  engine TLB invalidation.
+- [x] Add golden vectors for address bit 39, PTE cacheability bit 11, PDE bit
+  11, the 4 KiB page-size bit, misalignment, and overflow.
+- [x] Reject 32 KiB PDEs explicitly until implemented.
+- [x] Replace live PDE removal with scratch-page-table retention and require
+  context quiescence before reclamation.
+- [x] Separate the model's CPU shadow from GGTT-visible directory storage.
+- [x] Add a page-directory-in-GGTT provider contract with allocation, GTTADDR
+  write/read, flush, and release.
+- [x] Add active/quiesced state and reject PDE publication or reclamation when
+  quiescence cannot be established.
 
-### Phase B — Software and QEMU validation
+### Phase B — Software and QEMU validation (complete for the model)
 
-- Unit-test the corrected encoders and limits.
-- Unit-test scratch-table retention and no-free-while-PDE-cached behavior.
-- Unit-test rollback when PDE publication or invalidation fails.
-- Keep QEMU EDU as storage evidence only; do not use it to claim PPGTT.
-- Add a software simulator for the register sequence if useful, but label it
-  simulated.
+- [x] Unit-test corrected encoders, distinct limits, and hand-derived golden
+  vectors.
+- [x] Unit-test scratch-table retention, active-PDE rejection, deferred
+  reclamation, and no-free-while-PDE-cached behavior.
+- [x] Unit-test rollback when PDE publication fails.
+- [x] Run ASan/UBSan on the PPGTT and adapter tests.
+- [x] Re-run the QEMU EDU page-table test with corrected independent expected
+  values; keep it as storage evidence only.
+- [ ] Add a software simulator for the register sequence if useful, but label
+  it simulated.
 
 ### Phase C — Exclusive-ownership prerequisites
 
@@ -643,15 +662,25 @@ This plan is ready for implementation review only when all items are checked:
 - [ ] PTE/PDE invalidation sequence and completion are specified.
 - [ ] `ECOCHK`/`GAC_ECO_BITS` policy is decided.
 - [ ] Coherency and IOMMU behavior are specified.
-- [ ] Scratch-page-table retention replaces live PDE removal.
+- [x] Scratch-page-table retention replaces live PDE removal in the software
+  model.
+- [x] Separate PDE/PTE encoders and distinct 40-bit/39-bit limits are tested.
+- [x] A GGTT-resident directory provider and GTTADDR write path are modeled.
 - [ ] Register save/restore and recovery are tested.
 - [ ] The experiment is approved for a disposable system only.
 - [ ] No step requires i915 to remain bound during the physical run.
 
 ## 13. Status statement
 
-Stage 3 (hardware PPGTT) remains **not implemented**. The current milestone adds
-a documentation audit and a reviewed experiment plan. It does not add a
-hardware page-table publication path, GGTT ownership, register programming, TLB
-invalidation, VM activation, or physical GPU page-walk evidence. i915 remains
-the physical GPU owner.
+Stage 3 (hardware PPGTT) remains **not implemented**. The CPU-side model now has
+separate PDE/PTE encoders, correct 40-bit/39-bit limits, a GGTT-resident
+directory provider with GTTADDR PDE writes, active/quiesced PDE-publication
+rules, and scratch-table retention with deferred reclamation. Tests cover
+hand-derived golden vectors, boundaries, directory residency, live-PDE safety,
+and rollback. QEMU EDU page-table storage evidence was regenerated with the
+corrected PTE encoding.
+
+None of that is hardware page-table publication. There is still no real GGTT
+allocator, MMIO GTTADDR path, register programming, TLB invalidation, VM
+activation, or physical GPU page-walk evidence. i915 remains the physical GPU
+owner.

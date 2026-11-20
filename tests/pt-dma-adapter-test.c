@@ -145,6 +145,102 @@ static void fake_init(struct fake_provider *fake)
     fake->next_dma = 0x20000000;
 }
 
+struct fake_directory {
+    struct idw_device_scope scope;
+    uint32_t hardware[IDW_HSW_PPGTT_PDES];
+    int allocated;
+    unsigned int allocations;
+    unsigned int frees;
+};
+
+static int fake_directory_alloc(void *context,
+                                struct idw_hsw_ppgtt_directory *directory)
+{
+    struct fake_directory *fake = context;
+
+    if (fake->allocated)
+        return -EBUSY;
+    memset(fake->hardware, 0, sizeof(fake->hardware));
+    directory->size = sizeof(*directory);
+    directory->version = IDW_HSW_PPGTT_DIRECTORY_VERSION;
+    directory->ggtt_offset = 0x40000;
+    directory->bytes = IDW_HSW_PPGTT_DIRECTORY_BYTES;
+    directory->scope = fake->scope;
+    directory->allocation_cookie = 0x4449524543544f52ULL;
+    fake->allocated = 1;
+    ++fake->allocations;
+    return 0;
+}
+
+static void fake_directory_free(void *context,
+                                struct idw_hsw_ppgtt_directory *directory)
+{
+    struct fake_directory *fake = context;
+
+    (void)directory;
+    if (fake->allocated) {
+        fake->allocated = 0;
+        ++fake->frees;
+    }
+}
+
+static int fake_directory_write(void *context,
+                                const struct idw_hsw_ppgtt_directory *directory,
+                                uint32_t index, uint32_t pde)
+{
+    struct fake_directory *fake = context;
+
+    (void)directory;
+    if (index >= IDW_HSW_PPGTT_PDES)
+        return -EINVAL;
+    fake->hardware[index] = pde;
+    return 0;
+}
+
+static int fake_directory_read(void *context,
+                               const struct idw_hsw_ppgtt_directory *directory,
+                               uint32_t index, uint32_t *pde)
+{
+    struct fake_directory *fake = context;
+
+    (void)directory;
+    if (index >= IDW_HSW_PPGTT_PDES || !pde)
+        return -EINVAL;
+    *pde = fake->hardware[index];
+    return 0;
+}
+
+static int fake_directory_flush(void *context,
+                                const struct idw_hsw_ppgtt_directory *directory)
+{
+    (void)context;
+    (void)directory;
+    return 0;
+}
+
+static void fake_directory_init(struct fake_directory *fake)
+{
+    memset(fake, 0, sizeof(*fake));
+    fake->scope.device_cookie = FAKE_SCOPE_COOKIE;
+    fake->scope.generation = FAKE_SCOPE_GENERATION;
+}
+
+static void fake_directory_ops_init(struct idw_hsw_ppgtt_directory_ops *ops,
+                                    struct fake_directory *fake)
+{
+    *ops = (struct idw_hsw_ppgtt_directory_ops) {
+        .size = sizeof(*ops),
+        .version = IDW_HSW_PPGTT_DIRECTORY_VERSION,
+        .scope = { FAKE_SCOPE_COOKIE, FAKE_SCOPE_GENERATION },
+        .alloc_directory = fake_directory_alloc,
+        .free_directory = fake_directory_free,
+        .write_pde_gttaddr = fake_directory_write,
+        .read_pde_gttaddr = fake_directory_read,
+        .flush_gtt = fake_directory_flush,
+        .context = fake
+    };
+}
+
 static void fake_ops_init(struct idw_pt_dma_provider_ops *ops)
 {
     *ops = (struct idw_pt_dma_provider_ops) {
@@ -325,8 +421,10 @@ static int test_ppgtt_integration(void)
 {
     const uint64_t va = (1ULL << 22) - IDW_HASWELL_PPGTT_PAGE_SIZE;
     struct fake_provider fake;
+    struct fake_directory directory;
     struct idw_pt_dma_adapter adapter = {0};
     struct idw_hsw_ppgtt_page_ops page_ops;
+    struct idw_hsw_ppgtt_directory_ops directory_ops;
     struct idw_hsw_ppgtt_model *model = NULL;
     struct idw_hsw_ppgtt_translation translation = {
         .size = sizeof(translation)
@@ -350,24 +448,22 @@ static int test_ppgtt_integration(void)
     };
 
     fake_init(&fake);
+    fake_directory_init(&directory);
     CHECK(adapter_start(&adapter, &fake) == 0);
     CHECK(idw_pt_dma_adapter_page_ops(&adapter, &page_ops) == 0);
+    fake_directory_ops_init(&directory_ops, &directory);
     CHECK(page_ops.size == sizeof(page_ops));
     CHECK(page_ops.version == 1);
     CHECK(page_ops.scope.device_cookie == FAKE_SCOPE_COOKIE);
-    CHECK(idw_hsw_ppgtt_model_create(&page_ops, &model) == 0);
+    CHECK(idw_hsw_ppgtt_model_create(&page_ops, &directory_ops, &model) == 0);
     CHECK(idw_hsw_ppgtt_map(model, va, 2 * IDW_HASWELL_PPGTT_PAGE_SIZE,
                             mappings, 2) == 0);
     CHECK(fake.allocated == 2 && fake_live(&fake) == 2);
     CHECK(adapter.outstanding == 2);
-    CHECK(idw_hsw_ppgtt_pde(model, 0) ==
-          (idw_hsw_ppgtt_encode_address(fake.pages[0].page.dma_address) | 1u));
-    CHECK(idw_hsw_ppgtt_pde(model, 1) ==
-          (idw_hsw_ppgtt_encode_address(fake.pages[1].page.dma_address) | 1u));
-    CHECK(((uint32_t *)fake.pages[0].page.cpu_address)[1023] ==
-          (idw_hsw_ppgtt_encode_address(mappings[0].dma_address) | 1u));
-    CHECK(((uint32_t *)fake.pages[1].page.cpu_address)[0] ==
-          (idw_hsw_ppgtt_encode_address(mappings[1].dma_address) | 1u));
+    CHECK(idw_hsw_ppgtt_pde(model, 0) == 0x20000001u);
+    CHECK(idw_hsw_ppgtt_pde(model, 1) == 0x20001001u);
+    CHECK(((uint32_t *)fake.pages[0].page.cpu_address)[1023] == 0x30000001u);
+    CHECK(((uint32_t *)fake.pages[1].page.cpu_address)[0] == 0x30001001u);
     CHECK(idw_hsw_ppgtt_translate(model, va, &translation) == 0);
     CHECK(translation.dma_address == mappings[0].dma_address);
     CHECK(idw_hsw_ppgtt_translate(model,
@@ -378,20 +474,30 @@ static int test_ppgtt_integration(void)
     CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == 0);
 
     CHECK(idw_hsw_ppgtt_unmap(model, va, IDW_HASWELL_PPGTT_PAGE_SIZE) == 0);
-    CHECK(idw_hsw_ppgtt_pde(model, 0) == 0);
+    CHECK(idw_hsw_ppgtt_pde(model, 0) == 0x20000001u);
     CHECK(adapter.outstanding == 2);
     CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
     CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == 0);
-    CHECK(adapter.outstanding == 1 && fake.freed == 1);
+    CHECK(idw_hsw_ppgtt_reclaim_empty(model) == 0);
+    CHECK(idw_hsw_ppgtt_pde(model, 0) != 0x20000001u);
+    CHECK(adapter.outstanding == 3 && fake.freed == 0);
+    CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
+    CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == 0);
+    CHECK(adapter.outstanding == 2 && fake.freed == 1);
+
     CHECK(idw_hsw_ppgtt_unmap(model,
                               va + IDW_HASWELL_PPGTT_PAGE_SIZE,
                               IDW_HASWELL_PPGTT_PAGE_SIZE) == 0);
     CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
     CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == 0);
-    CHECK(adapter.outstanding == 0 && fake_live(&fake) == 0);
+    CHECK(idw_hsw_ppgtt_reclaim_empty(model) == 0);
+    CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
+    CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == 0);
+    CHECK(adapter.outstanding == 1 && fake.freed == 2);
 
     idw_hsw_ppgtt_model_destroy(model);
     CHECK(fake.allocated == fake.freed);
+    CHECK(adapter.outstanding == 0 && fake_live(&fake) == 0);
     CHECK(idw_pt_dma_adapter_fini(&adapter) == 0);
     return 0;
 }
@@ -414,16 +520,20 @@ static int test_ppgtt_rollback_and_scope(void)
         }
     };
     struct fake_provider fake;
+    struct fake_directory directory;
     struct idw_pt_dma_adapter adapter;
     struct idw_hsw_ppgtt_page_ops page_ops;
+    struct idw_hsw_ppgtt_directory_ops directory_ops;
     struct idw_hsw_ppgtt_model *model = NULL;
 
     fake_init(&fake);
+    fake_directory_init(&directory);
     fake.alloc_fail_call = 2;
     memset(&adapter, 0, sizeof(adapter));
     CHECK(adapter_start(&adapter, &fake) == 0);
     CHECK(idw_pt_dma_adapter_page_ops(&adapter, &page_ops) == 0);
-    CHECK(idw_hsw_ppgtt_model_create(&page_ops, &model) == 0);
+    fake_directory_ops_init(&directory_ops, &directory);
+    CHECK(idw_hsw_ppgtt_model_create(&page_ops, &directory_ops, &model) == 0);
     CHECK(idw_hsw_ppgtt_map(model, va, 2 * IDW_HASWELL_PPGTT_PAGE_SIZE,
                             mappings, 2) == -ENOMEM);
     CHECK(idw_hsw_ppgtt_pde(model, 0) == 0);
@@ -434,11 +544,13 @@ static int test_ppgtt_rollback_and_scope(void)
     CHECK(idw_pt_dma_adapter_fini(&adapter) == 0);
 
     fake_init(&fake);
+    fake_directory_init(&directory);
     fake.wrong_scope_call = 1;
     memset(&adapter, 0, sizeof(adapter));
     CHECK(adapter_start(&adapter, &fake) == 0);
     CHECK(idw_pt_dma_adapter_page_ops(&adapter, &page_ops) == 0);
-    CHECK(idw_hsw_ppgtt_model_create(&page_ops, &model) == 0);
+    fake_directory_ops_init(&directory_ops, &directory);
+    CHECK(idw_hsw_ppgtt_model_create(&page_ops, &directory_ops, &model) == 0);
     CHECK(idw_hsw_ppgtt_map(model, va, IDW_HASWELL_PPGTT_PAGE_SIZE,
                             mappings, 1) == -EXDEV);
     CHECK(adapter.outstanding == 0 && fake_live(&fake) == 0);
@@ -446,11 +558,13 @@ static int test_ppgtt_rollback_and_scope(void)
     CHECK(idw_pt_dma_adapter_fini(&adapter) == 0);
 
     fake_init(&fake);
+    fake_directory_init(&directory);
     fake.bad_dma_call = 1;
     memset(&adapter, 0, sizeof(adapter));
     CHECK(adapter_start(&adapter, &fake) == 0);
     CHECK(idw_pt_dma_adapter_page_ops(&adapter, &page_ops) == 0);
-    CHECK(idw_hsw_ppgtt_model_create(&page_ops, &model) == 0);
+    fake_directory_ops_init(&directory_ops, &directory);
+    CHECK(idw_hsw_ppgtt_model_create(&page_ops, &directory_ops, &model) == 0);
     CHECK(idw_hsw_ppgtt_map(model, va, IDW_HASWELL_PPGTT_PAGE_SIZE,
                             mappings, 1) == -ERANGE);
     CHECK(adapter.outstanding == 0 && fake_live(&fake) == 0);

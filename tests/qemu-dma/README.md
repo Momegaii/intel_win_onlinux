@@ -55,18 +55,20 @@ guest with `SIGTTIN` when the test is launched from a terminal.
 
 ## Recorded evidence
 
-On 2026-11-20 the page-table path passed in a Debian 13 container with QEMU
-10.0.13 TCG and a Debian `6.12.117+deb13-amd64` guest:
+On 2026-11-20 the corrected page-table path passed in a Debian 13 container
+with QEMU 10.0.13 TCG and a Debian `6.12.117+deb13-amd64` guest:
 
 ```text
-IDW_QEMU_DMA: page-table DMA layout verified bytes=4096 first=00000ab1 last=003ffab1
+IDW_QEMU_DMA: page-table DMA layout verified bytes=4096 first=000002b1 last=003ff2b1
 IDW_QEMU_DMA: PASS: probe, page-table DMA, 32 DMA cycles, cleanup and remove completed
 QEMU exit status: 33
 ```
 
 The full serial log is
-`tests/qemu-dma/evidence-2026-11-20-tcg-page-table.log` (SHA-256
-`e549ebbf7664bdfff05d8ea259efd2df1ace950cb67ab259c47c57a4b198d6da`).
+`tests/qemu-dma/evidence-2026-11-20-tcg-page-table-corrected.log` (SHA-256
+`393140205e06fbb6b9e3eaad161eb6181fed9ca9c3274e11108df0693836f22a`).
+The earlier `evidence-2026-11-20-tcg-page-table.log` used the superseded
+shared PDE/PTE encoder and is retained as historical evidence only.
 
 ## Evidence boundary
 
