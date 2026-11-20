@@ -138,6 +138,77 @@ int test_validates_batch_and_arguments()
     return 0;
 }
 
+int test_haswell_store_dword_encoding_and_bounds()
+{
+    constexpr uint64_t address = 0x10000014;
+    constexpr uint32_t value = 0xdeadbeef;
+    uint32_t batch[6]{};
+    uint64_t decoded_address = 0;
+    uint32_t decoded_value = 0;
+
+    CHECK(idw::build_haswell_store_dword_batch(
+              address, value, batch, sizeof(batch)) == 0);
+    CHECK(batch[0] == 0x10000002u);
+    CHECK(batch[1] == 0);
+    CHECK(batch[2] == address);
+    CHECK(batch[3] == value);
+    CHECK(batch[4] == idw::kHaswellMiBatchBufferEnd);
+    CHECK(batch[5] == idw::kHaswellMiNoop);
+    CHECK(idw::validate_haswell_store_dword_batch(
+              batch, sizeof(batch), &decoded_address, &decoded_value) == 0);
+    CHECK(decoded_address == address && decoded_value == value);
+    CHECK(idw::build_haswell_store_dword_batch(
+              0xfffffffcu, value, batch, sizeof(batch)) == 0);
+    CHECK(idw::build_haswell_store_dword_batch(
+              address + 1, value, batch, sizeof(batch)) == -EINVAL);
+    CHECK(idw::build_haswell_store_dword_batch(
+              0, value, batch, sizeof(batch)) == -EINVAL);
+    CHECK(idw::build_haswell_store_dword_batch(
+              0x100000000ULL, value, batch, sizeof(batch)) == -EINVAL);
+    CHECK(idw::build_haswell_store_dword_batch(
+              address, value, batch, sizeof(batch) - sizeof(uint32_t)) ==
+          -EINVAL);
+    CHECK(idw::build_haswell_store_dword_batch(
+              address, value, nullptr, sizeof(batch)) == -EINVAL);
+
+    const uint32_t valid_batch[6] = {
+        idw::kHaswellMiStoreDataImmDword, 0,
+        static_cast<uint32_t>(address), value,
+        idw::kHaswellMiBatchBufferEnd, idw::kHaswellMiNoop
+    };
+    CHECK(idw::validate_haswell_store_dword_batch(
+              nullptr, sizeof(valid_batch), nullptr, nullptr) == -EINVAL);
+    CHECK(idw::validate_haswell_store_dword_batch(
+              valid_batch, sizeof(valid_batch) - sizeof(uint32_t),
+              nullptr, nullptr) == -EINVAL);
+    uint32_t malformed[6]{};
+    std::memcpy(malformed, valid_batch, sizeof(malformed));
+    malformed[0] |= 1u;
+    CHECK(idw::validate_haswell_store_dword_batch(
+              malformed, sizeof(malformed), nullptr, nullptr) == -EINVAL);
+    std::memcpy(malformed, valid_batch, sizeof(malformed));
+    malformed[1] = 1;
+    CHECK(idw::validate_haswell_store_dword_batch(
+              malformed, sizeof(malformed), nullptr, nullptr) == -EINVAL);
+    std::memcpy(malformed, valid_batch, sizeof(malformed));
+    malformed[2] |= 1u;
+    CHECK(idw::validate_haswell_store_dword_batch(
+              malformed, sizeof(malformed), nullptr, nullptr) == -EINVAL);
+    std::memcpy(malformed, valid_batch, sizeof(malformed));
+    malformed[2] = 0;
+    CHECK(idw::validate_haswell_store_dword_batch(
+              malformed, sizeof(malformed), nullptr, nullptr) == -EINVAL);
+    std::memcpy(malformed, valid_batch, sizeof(malformed));
+    malformed[4] = idw::kHaswellMiNoop;
+    CHECK(idw::validate_haswell_store_dword_batch(
+              malformed, sizeof(malformed), nullptr, nullptr) == -EINVAL);
+    std::memcpy(malformed, valid_batch, sizeof(malformed));
+    malformed[5] = idw::kHaswellMiBatchBufferEnd;
+    CHECK(idw::validate_haswell_store_dword_batch(
+              malformed, sizeof(malformed), nullptr, nullptr) == -EINVAL);
+    return 0;
+}
+
 int test_successful_completion_and_cleanup()
 {
     Fake fake;
@@ -255,11 +326,12 @@ int test_all_cleanup_is_attempted()
 int main()
 {
     if (test_validates_batch_and_arguments() ||
+        test_haswell_store_dword_encoding_and_bounds() ||
         test_successful_completion_and_cleanup() ||
         test_failed_submission_and_timeout_cleanup() ||
         test_all_cleanup_is_attempted())
         return 1;
-    std::puts("PASS: Haswell no-op batch validation, submission failure, timeout, and cleanup tests");
+    std::puts("PASS: Haswell no-op and store-dword encoding, bounds, failure, and cleanup tests");
     std::puts("NOTE: callbacks are simulated; this is not physical GPU execution evidence.");
     return 0;
 }

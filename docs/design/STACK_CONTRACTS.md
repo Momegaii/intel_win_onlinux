@@ -71,20 +71,21 @@ This backend can validate object lifetime and real submission while i915 owns th
 ABI/UAPI + diagnostics
   -> NT runtime + object/handle manager
   -> adapter/device lifecycle dispatcher
-  -> phase 1: GPU memory manager + GPU VA
-  -> phase 2: Haswell Gen7.5 PPGTT
-  -> phase 3: GGTT + DMA + hardware memory mapping
-  -> phase 4: render/blitter/video submission
-  -> phase 5: fences + interrupts + completion
-  -> phase 6: VidSch scheduler + recovery
-  -> phase 7: independent UMD + shader compiler
-  -> phase 8: display/KMS integration
-  -> phase 9: NTOSKRNL/DXGKRNL compatibility completion
-  -> phase 10: independent ownership + full integration
+  -> stage 1: GPU resource read/write (i915-assisted evidence passed)
+  -> stage 2: native DMA allocation + mapping
+  -> stage 3: IDW-created Haswell Gen7.5 hardware PPGTT
+  -> stage 4: independent submission + completion
+  -> stage 5: scheduler, queues, timeout + recovery
+  -> stage 6: UMD, shader compilation + rendering
+  -> stage 7: IDW-controlled display/KMS pipeline
+  -> stage 8: safe exclusive ownership transition
 ```
 
-The detailed phase plan and Gen7.5 PPGTT evidence gates are in
-`HASWELL_GEN75_PPGTT_PLAN.md`. Independence is the design target from phase 1;
+The eight-stage proof gates are summarized in the README and
+`docs/IMPLEMENTATION_STATUS.md`. Compatibility work in the A–Z architecture
+continues alongside these hardware milestones. The detailed implementation
+plan and Gen7.5 PPGTT evidence gates are in
+`HASWELL_GEN75_PPGTT_PLAN.md`. Independence is the design target from stage 1;
 i915 is only a temporary validation owner. Operational ownership restrictions
 may be relaxed only on an isolated test system with exclusive device ownership.
 Do not trade away source validation, lifetime rules, cleanup, rollback, or

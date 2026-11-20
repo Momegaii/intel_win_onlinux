@@ -2,6 +2,8 @@
 #include "../include/idw/gpu_submission.hpp"
 
 #include <cerrno>
+#include <cstring>
+#include <limits>
 
 namespace idw {
 namespace {
@@ -39,6 +41,47 @@ int validate_haswell_noop_batch(const void *bytes, size_t length)
                      (static_cast<uint32_t>(raw[7]) << 24);
     return command == kHaswellMiBatchBufferEnd &&
            alignment_noop == kHaswellMiNoop ? 0 : -EINVAL;
+}
+
+int build_haswell_store_dword_batch(uint64_t gpu_va, uint32_t value,
+                                    void *bytes, size_t length)
+{
+    if (!bytes || length != kHaswellStoreDwordBatchLength || !gpu_va ||
+        (gpu_va & (sizeof(uint32_t) - 1)) ||
+        gpu_va > std::numeric_limits<uint32_t>::max() - sizeof(uint32_t) + 1)
+        return -EINVAL;
+
+    const uint32_t words[6] = {
+        kHaswellMiStoreDataImmDword,
+        0,
+        static_cast<uint32_t>(gpu_va),
+        value,
+        kHaswellMiBatchBufferEnd,
+        kHaswellMiNoop
+    };
+    std::memcpy(bytes, words, sizeof(words));
+    return 0;
+}
+
+int validate_haswell_store_dword_batch(const void *bytes, size_t length,
+                                       uint64_t *gpu_va, uint32_t *value)
+{
+    if (!bytes || length != kHaswellStoreDwordBatchLength)
+        return -EINVAL;
+
+    uint32_t words[6]{};
+    std::memcpy(words, bytes, sizeof(words));
+    const uint64_t address = words[2];
+    if (!address || words[0] != kHaswellMiStoreDataImmDword || words[1] != 0 ||
+        (address & (sizeof(uint32_t) - 1)) ||
+        words[4] != kHaswellMiBatchBufferEnd || words[5] != kHaswellMiNoop)
+        return -EINVAL;
+
+    if (gpu_va)
+        *gpu_va = address;
+    if (value)
+        *value = words[3];
+    return 0;
 }
 
 const char *gpu_submission_stage_name(GpuSubmissionStage stage)

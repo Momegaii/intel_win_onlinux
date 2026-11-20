@@ -56,28 +56,27 @@ The upstream Linux v6.12 i915 source provides a reference baseline:
   implementation. Do not copy Gen8+ address-width, entry formats, or
   invalidation assumptions.
 
-## Delivery phases
+## Delivery stages
 
-These are implementation phases, with explicit gates. A phase is not complete
-because its interface or a CPU-only model compiles.
+These are implementation stages with explicit evidence gates. A stage is not
+complete because its interface or a CPU-only model compiles.
 
-| Phase | Deliverable | Completion evidence |
-|---|---|---|
-| 1. GPU memory manager and GPU VA | CPU-only guarded GPU-VA interval allocator implemented; allocation/backing objects, budgets, map references, residency, pin counts and eviction policy remain | Current unit tests cover allocation, guards, overlap, alignment and bounds. Manager completion still requires lifetime, in-flight reference, eviction and concurrency tests. |
-| 2. Haswell Gen7.5 PPGTT | CPU-only legacy directory/table model, verified address encoding, translation, map/unmap, invalidation-state tracking and deferred empty-table reclamation implemented; hardware page-table pages, writes, invalidation and activation remain | `make ppgtt-model-test` covers geometry, independent golden address vectors, PDE/PTE encoding, cross-PDE ranges, atomic rejection of malformed unmaps, duplicate-DMA/page-allocation rollback, malformed mappings, deferred reclamation, invalidation-range coalescing/stale generations and poison-on-failure. |
-| 3. GGTT, DMA and hardware memory mapping | Backend-neutral, device-scoped page-table memory contract and i915/native backend boundary implemented; actual native DMA allocation, SG mapping, GGTT entries, synchronization, invalidation and teardown remain | `make backend-contract-test` checks that i915 cannot claim native DMA/PPGTT capabilities, native contracts require exclusive ownership and complete operations, and page/mapping scopes must match. These are contract tests with synthetic descriptors, not DMA API or GPU validation. |
-| 4. Render/blitter/video submission | Separate engine capabilities and rings, validated Gen7.5 command streams, object references and batch bounds | Engine-specific command validation, invalid-command rejection, isolated execution tests |
-| 5. Fences, interrupts and completion | Monotonic fence timelines, IRQ setup/acknowledgement, timeout and reset error completion | No-success-on-submit-only tests, IRQ/fence races, timeout/reset/failure injection |
-| 6. VidSch scheduler and recovery | Contexts, engine queues, dependencies, fairness limits, preemption capability, timeout/reset recovery | Multi-context queue tests, starvation tests, stuck-engine recovery in disposable hardware environment |
-| 7. Independent UMD and shader compiler | UMD protocol, resource binding, shader compiler and safe command generation | Compiler golden tests, command validation, end-to-end rendering in isolated environment |
-| 8. Display/KMS integration | Independent display discovery, modesetting, planes, fences and vblank integration | Connector/CRTC lifecycle, modeset rollback, scanout and suspend/resume tests |
-| 9. NTOSKRNL/DXGKRNL compatibility completion | Precisely scoped IDW-native compatibility services and any separately specified D3DKMT/DDI ABI | ABI/version tests and compatibility suite; do not imply Microsoft's Windows kernel ABI by naming |
-| 10. Independent ownership and integration | IDW backend alone owns a dedicated Haswell GPU and runs the complete stack | Reproducible boot/probe/workload/recovery evidence with i915 unbound, plus safe rollback to the prior system image |
+| Stage | Milestone | Proof required | Current status |
+|---|---|---|---|
+| 1 | GPU resource read/write | GPU writes data into a managed resource; CPU reads back the exact result. | Passed on Haswell `8086:0412` through i915: wrote `0x2468ace0` at offset 16 and verified exact CPU readback. This is not independent execution. |
+| 2 | Native DMA | IDW allocates and maps real DMA memory for its exclusively owned PCI device. | In progress: an ownership-checked `dma_alloc_coherent` page provider compiles and tracks device generation/allocation cookies; no real IDW-owned device has called it. Existing page-table tests still use synthetic descriptors. |
+| 3 | Hardware PPGTT | GPU uses IDW-created Haswell Gen7.5 page tables. | Not implemented; the existing model is CPU-only, and i915 owns hardware page tables. |
+| 4 | Independent submission | IDW submits and completes commands without i915 graphics execution. | Not implemented. |
+| 5 | Scheduler | Multiple contexts, queues, timeout and recovery. | Not implemented independently. |
+| 6 | UMD | Real shader compilation and rendering. | Not implemented. |
+| 7 | Display/KMS | IDW-controlled display pipeline. | Not implemented. |
+| 8 | Ownership transition | Safely detach i915 and give IDW exclusive hardware control. | Not attempted; i915 remains bound and owns the GPU. |
 
-Phases 2 and 3 have a strict dependency: page-table data structures and
-transaction semantics can be developed and tested in CPU memory before DMA,
-but a GPU mapping is not real until its backing pages have valid device DMA
-addresses and the required Haswell invalidation/activation has completed.
+Stage 2 must supply valid DMA-backed page-table memory for stage 3. A GPU
+mapping is not hardware-backed until the Haswell-specific publication,
+synchronization, invalidation and activation requirements have completed.
+The CPU PPGTT model and the stage 1 i915-assisted write/readback do not satisfy
+that gate.
 
 ## PPGTT subsystem boundaries
 
@@ -203,6 +202,6 @@ synthetic DMA addresses, which must never be treated as a device DMA mapping.
    ownership handoff. Never run experimental page-table programming while i915
    is bound or on the active desktop GPU.
 
-Only phase-specific evidence changes implementation status. A passing CPU model
+Only stage-specific evidence changes implementation status. A passing CPU model
 is software evidence; it does not prove a hardware page walk, translation
 invalidation, independent execution, or safe device ownership.

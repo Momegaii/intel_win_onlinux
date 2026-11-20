@@ -52,18 +52,25 @@ private:
                       uint64_t bytes);
     static int invalidate(void *userdata, idw_gpuva va, uint64_t bytes);
     static int submit(void *userdata, uint64_t backing, idw_gpuva va,
-                      uint64_t bytes, uint64_t *fence);
+                      uint64_t bytes,
+                      const MemorySubmissionCommand& command,
+                      uint64_t *fence);
     static int wait(void *userdata, uint64_t fence, int64_t timeout_ns);
     static int quiesce(void *userdata, uint64_t fence);
+    static int cpu_read_dword(void *userdata, uint64_t backing,
+                              uint64_t offset, uint32_t *value);
+    static int cpu_write_dword(void *userdata, uint64_t backing,
+                               uint64_t offset, uint32_t value);
 
     int find_context(uint32_t backing_handle, size_t& index) const;
     int find_fence(uint64_t token, size_t& index) const;
     int create_context(uint32_t *context_id);
     int destroy_context(uint32_t context_id);
     int create_batch(uint32_t& handle);
-    int upload_noop_batch(uint32_t handle);
+    int upload_batch(uint32_t handle, const void *bytes, uint32_t length);
     int exec_resource_batch(uint32_t context_id, uint32_t resource_handle,
                             idw_gpuva resource_va, uint32_t batch_handle,
+                            uint32_t batch_length,
                             idw_gpuva *actual_resource_va);
     int wait_batch(uint32_t handle, int64_t timeout_ns);
     int close_batch(uint32_t handle);

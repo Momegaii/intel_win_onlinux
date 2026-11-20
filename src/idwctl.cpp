@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -10,6 +11,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <fcntl.h>
@@ -1415,9 +1417,204 @@ static int gpu_memory_manager_test() {
     return 0;
 }
 
+static int gpu_resource_write_test() {
+    constexpr uint64_t GPUVA_MIN = 0x10000000ULL;
+    constexpr uint64_t GPUVA_MAX = 0x11000000ULL;
+    constexpr uint64_t RESOURCE_SIZE = 4096;
+    constexpr uint64_t WRITE_OFFSET = 16;
+    constexpr uint32_t INITIAL_VALUE = 0x13579bdf;
+    constexpr uint32_t EXPECTED_VALUE = 0x2468ace0;
+    constexpr auto READBACK_TIMEOUT = std::chrono::seconds(5);
+
+    auto gpus = discover();
+    int fd = -1;
+    const Gpu* chosen = nullptr;
+    for (const auto& gpu : gpus) {
+        if (gpu.device != "0x0412")
+            continue;
+        fd = ::open(gpu.node.c_str(), O_RDWR | O_CLOEXEC);
+        if (fd >= 0) {
+            chosen = &gpu;
+            break;
+        }
+    }
+    if (!chosen) {
+        std::cerr << "REFUSED: gpu-resource-write-test requires an accessible "
+                     "Haswell 0x0412 render node\n";
+        return 2;
+    }
+    if (chosen->driver != "i915") {
+        std::cerr << "REFUSED: expected i915 ownership for the assisted "
+                     "backend; found " << chosen->driver << "\n";
+        ::close(fd);
+        return 3;
+    }
+
+    idw::I915AssistedMemoryBackend backend(fd);
+    idw::MemoryManager manager;
+    idw_handle resource = 0;
+    idw_gpuva gpu_va = 0;
+    uint64_t ticket = 0;
+    bool manager_initialized = false;
+    bool ticket_live = false;
+    bool ok = true;
+    auto fail = [&](const char* operation, int error) {
+        std::cerr << "FAIL: " << operation << ": "
+                  << std::strerror(error < 0 ? -error : error) << "\n";
+        ok = false;
+    };
+
+    int ret = manager.initialize(backend.operations(), &backend,
+                                 GPUVA_MIN, GPUVA_MAX);
+    if (ret) {
+        fail("initialize integrated memory manager", ret);
+    } else {
+        manager_initialized = true;
+    }
+    if (ok) {
+        ret = manager.create(RESOURCE_SIZE, resource);
+        if (ret)
+            fail("create IDW-managed i915 GEM resource", ret);
+    }
+    if (ok) {
+        ret = manager.bind(resource, 0, gpu_va);
+        if (ret)
+            fail("bind managed resource into i915 context VM", ret);
+    }
+    if (ok) {
+        ret = manager.cpu_write_dword(resource, WRITE_OFFSET, INITIAL_VALUE);
+        if (ret)
+            fail("initialize resource through CPU PWRITE", ret);
+    }
+    if (ok) {
+        uint32_t initial_readback = 0;
+        ret = manager.cpu_read_dword(resource, WRITE_OFFSET, initial_readback);
+        if (ret)
+            fail("verify initial resource value through CPU PREAD", ret);
+        else if (initial_readback != INITIAL_VALUE) {
+            std::cerr << "FAIL: initial resource value mismatch: got 0x"
+                      << std::hex << initial_readback << std::dec << "\n";
+            ok = false;
+        }
+    }
+    if (ok) {
+        ret = manager.submit_write_dword(resource, WRITE_OFFSET,
+                                         EXPECTED_VALUE, ticket);
+        ticket_live = ticket != 0;
+        if (ret)
+            fail("submit Haswell MI_STORE_DATA_IMM through managed context",
+                 ret);
+    }
+    if (ok) {
+        ret = manager.wait(ticket, idw::kDefaultGpuWaitTimeoutNs);
+        if (!ret) {
+            ticket_live = false;
+        } else {
+            fail("wait for GPU resource-write batch", ret);
+            const int recover_ret = manager.recover_submission(ticket);
+            if (!recover_ret) {
+                ticket_live = false;
+                std::cerr << "RECOVERED: GPU write submission quiesced after "
+                             "wait failure\n";
+            } else {
+                fail("quiesce GPU write submission", recover_ret);
+            }
+        }
+    }
+
+    if (ok && !ticket_live) {
+        const auto deadline = std::chrono::steady_clock::now() +
+                              READBACK_TIMEOUT;
+        uint32_t readback = 0;
+        for (;;) {
+            ret = manager.cpu_read_dword(resource, WRITE_OFFSET, readback);
+            if (ret) {
+                fail("read managed resource through CPU PREAD", ret);
+                break;
+            }
+            if (readback == EXPECTED_VALUE)
+                break;
+            if (std::chrono::steady_clock::now() >= deadline) {
+                std::cerr << "FAIL: GPU write readback timed out; expected 0x"
+                          << std::hex << EXPECTED_VALUE << ", got 0x"
+                          << readback << std::dec << "\n";
+                ok = false;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
+    if (ticket_live) {
+        ret = manager.recover_submission(ticket);
+        if (ret)
+            fail("recover outstanding GPU write submission", ret);
+        else
+            ticket_live = false;
+    }
+    if (resource && manager_initialized) {
+        idw::MemoryResourceInfo info{};
+        ret = manager.query(resource, info);
+        if (ret) {
+            fail("query managed resource during cleanup", ret);
+        } else if (info.submission_references) {
+            fail("managed resource still has GPU references during cleanup",
+                 -EBUSY);
+        } else {
+            if (info.bound || info.recovery_required) {
+                ret = info.recovery_required ?
+                    manager.recover_binding(resource) :
+                    manager.unbind(resource);
+                if (ret) {
+                    fail("unbind resource and release i915 context VM", ret);
+                    ret = manager.recover_binding(resource);
+                    if (ret)
+                        fail("retry managed resource unbind", ret);
+                }
+            }
+            ret = manager.destroy(resource);
+            if (ret) {
+                fail("destroy manager-owned GEM backing", ret);
+                ret = manager.destroy(resource);
+                if (ret)
+                    fail("retry manager-owned GEM destruction", ret);
+            }
+        }
+    }
+    if (manager_initialized && manager.resource_count() == 0) {
+        ret = manager.shutdown();
+        if (ret)
+            fail("shutdown integrated memory manager", ret);
+    } else if (manager_initialized) {
+        fail("memory manager retained resources after cleanup", -EBUSY);
+    }
+    ret = backend.close_all();
+    if (ret)
+        fail("clean up i915 backend objects", ret);
+    if (backend.context_count() || backend.pending_fence_count() ||
+        backend.resource_count())
+        fail("i915 backend retained contexts, fences, or GEM objects", -EBUSY);
+    if (::close(fd) != 0)
+        fail("close i915 render node", -errno);
+
+    if (!ok)
+        return 4;
+    std::cout << "PASS: Haswell/i915 wrote 0x" << std::hex << EXPECTED_VALUE
+              << std::dec << " to IDW-managed resource " << resource
+              << " at GPU VA 0x" << std::hex << gpu_va + WRITE_OFFSET
+              << std::dec << " (offset " << WRITE_OFFSET << ").\n"
+              << "The initial CPU value was 0x" << std::hex << INITIAL_VALUE
+              << std::dec << "; GEM_WAIT completed and CPU PREAD observed the "
+                 "exact GPU-written value.\n"
+              << "Boundary: i915 owns GEM backing, PPGTT mapping, address "
+                 "translation, command execution, and scheduling. This does "
+                 "not validate independent IDW DMA, PPGTT, or scheduling.\n";
+    return 0;
+}
+
 static void usage(const char* p) {
     std::cout << "IDW — Intel GPU inspection and DRM smoke test\n"
-              << "Usage:\n  " << p << " info [--json]\n  " << p << " selftest\n  " << p << " gem-resource-test\n  " << p << " memory-test [count] [size-bytes]\n  " << p << " resource-test [count] [size-bytes]\n  " << p << " dmabuf-test\n  " << p << " gpu-submit [count]\n  " << p << " gpu-resource-test\n  " << p << " gpu-memory-test\n  " << p << " gpu-memory-manager-test\n  " << p << " kernel\n  " << p << " --help\n";
+              << "Usage:\n  " << p << " info [--json]\n  " << p << " selftest\n  " << p << " gem-resource-test\n  " << p << " memory-test [count] [size-bytes]\n  " << p << " resource-test [count] [size-bytes]\n  " << p << " dmabuf-test\n  " << p << " gpu-submit [count]\n  " << p << " gpu-resource-test\n  " << p << " gpu-memory-test\n  " << p << " gpu-memory-manager-test\n  " << p << " gpu-resource-write-test\n  " << p << " kernel\n  " << p << " --help\n";
 }
 int main(int argc,char** argv) {
     if(argc < 2 || std::string(argv[1])=="--help" || std::string(argv[1])=="-h") { usage(argv[0]); return 0; }
@@ -1481,6 +1678,10 @@ int main(int argc,char** argv) {
     if(cmd=="gpu-memory-manager-test") {
         if (argc != 2) { usage(argv[0]); return 1; }
         return gpu_memory_manager_test();
+    }
+    if(cmd=="gpu-resource-write-test") {
+        if (argc != 2) { usage(argv[0]); return 1; }
+        return gpu_resource_write_test();
     }
     if(cmd=="kernel") {
         if (argc != 2) { usage(argv[0]); return 1; }

@@ -11,6 +11,10 @@ IDW is a Windows-inspired graphics-kernel architecture project for Linux. The A�
 - Provides an integrated allocation/VA/bind/submit/completion/unbind/destroy
   lifecycle through an i915-assisted backend; the explicit Haswell test passes
   with i915 retaining hardware ownership.
+- Verifies an actual GPU write into a managed GEM resource on Haswell/i915:
+  the CPU initializes `0x13579bdf`, the GPU writes `0x2468ace0`, and CPU
+  readback confirms the exact result. This is Stage 1 evidence only; i915 owns
+  the mappings and execution.
 - Displays live i915 telemetry where the running kernel exports it.
 - Provides a desktop properties GUI and an optional read-only debugfs snapshot helper.
 - Provides an optional `/dev/idw` resource/control plane and IDW-native miniport lifecycle dispatcher. It supports metadata-only handles, opt-in kernel system-memory-backed allocations with shared userspace mappings, and retained dma-buf references. A disposable test miniport exercises AddDevice → StartDevice → CreateAllocation(metadata only) → StopDevice → RemoveDevice. It does not register a PCI driver, map BARs, program the GPU, or compete with i915.
@@ -91,20 +95,23 @@ Haswell is Gen 7.5. Do not assume Gen8+ address-space or command-stream features
 
 ## Correct development sequence
 
-1. **GPU memory management:** real GPU virtual addresses, page-table mappings, residency and eviction.
-2. **PPGTT:** implement the correct Haswell Gen7.5 mechanisms, not Gen8+ assumptions.
-3. **Hardware submission:** engine-specific ring buffers, command execution and completion fences.
-4. **Scheduler:** contexts, queues, preemption limitations, timeouts and recovery.
-5. **UMD:** resource management, shader compilation and Gen7.5 command generation.
-6. **Display:** independent integration with the display hardware and KMS.
-7. **Ownership:** safely transition away from i915 only after the independent backend is ready.
+| Stage | Milestone | Proof required | Status |
+|---|---|---|---|
+| 1 | GPU resource read/write | GPU writes data into a managed resource; CPU reads back the exact result. | Complete for the i915-assisted path: Haswell `8086:0412` wrote `0x2468ace0` at resource offset 16 and CPU read it back exactly. |
+| 2 | Native DMA | IDW allocates and maps real DMA memory for its exclusively owned PCI device. | Partial: an ownership-checked kernel DMA-coherent page provider compiles, but has not been called for a real IDW-owned device. i915 is still bound, so Stage 2 is not complete. |
+| 3 | Hardware PPGTT | GPU uses IDW-created Haswell Gen7.5 page tables. | Not implemented; current page tables are a CPU-only model and i915 owns hardware mappings. |
+| 4 | Independent submission | IDW submits and completes commands without i915 graphics execution. | Not implemented; all demonstrated execution is i915-assisted. |
+| 5 | Scheduler | Multiple contexts, queues, timeout and recovery. | Not implemented independently; existing context/fence tests do not establish an IDW scheduler. |
+| 6 | UMD | Real shader compilation and rendering. | Not implemented. |
+| 7 | Display/KMS | IDW-controlled display pipeline. | Not implemented. |
+| 8 | Ownership transition | Safely detach i915 and give IDW exclusive hardware control. | Not attempted; i915 remains bound and owns the GPU. |
 
 The i915-assisted `gpu-memory-test` verifies fixed GPU-VA placement in a real
 Haswell context and exercises i915 GEM backing advice. It does **not** implement
 IDW's VidMm, hardware PPGTT, forced eviction, or native GPU ownership; i915
 remains the sole hardware owner. Run it explicitly with `make gpu-memory-test`.
 
-The independence-first implementation phases, Gen7.5 PPGTT architecture,
+The independence-first implementation stages, Gen7.5 PPGTT architecture,
 hardware-backend interfaces, failure/rollback rules, and validation gates are
 specified in [`docs/design/HASWELL_GEN75_PPGTT_PLAN.md`](docs/design/HASWELL_GEN75_PPGTT_PLAN.md).
 The CPU-only GPU-VA interval allocator and Haswell Gen7.5 PPGTT software model
@@ -154,6 +161,17 @@ backend's unbind/invalidation boundary; the current public path has no separate
 IDW invalidation ioctl. The physical run did not induce timeout or invalidation
 failure.
 
+`make gpu-resource-write-test` is an opt-in Haswell `8086:0412` test of an
+actual managed-resource write. It initializes a GEM dword through the manager's
+CPU-write callback, submits a Gen7.5 RenderCS `MI_STORE_DATA_IMM` command at
+the resource's pinned PPGTT GPU VA through the existing per-resource context,
+waits with GEM_WAIT, and reads back the exact value through GEM_PREAD. The
+command is built and bounds-checked by the Haswell-specific encoder; simulated
+tests cover malformed encodings, submission/wait/read failures, held resource
+references, and cleanup. The encoding was checked against Intel's Haswell PRM
+before the physical run. This remains i915-assisted: i915 owns backing, mapping,
+address translation, execution, and scheduling.
+
 The user-space i915 GEM resource backend in
 `src/i915_gem_resource_backend.cpp` creates/closes GEM objects, tracks
 `WILLNEED`/`DONTNEED` backing-advice results and `GEM_BUSY` activity samples,
@@ -193,22 +211,15 @@ The public ioctl layout has an automated 64-bit native ABI test covering structu
 
 ## Next engineering gates
 
-The CPU-only GPU-VA allocator and Gen7.5 PPGTT model are foundations, not
-completion of Phase 1 or 2. Continue in this order:
+Stage 1 now has physical i915-assisted write/readback evidence; it does not
+complete independent GPU memory management. Continue with native DMA allocation
+and mapping, then connect that memory to actual Haswell Gen7.5 page tables.
+Proceed through independent submission, scheduler, UMD, display/KMS, and only
+then an ownership transition after a complete isolated-device validation.
+Compatibility work and the preserved A–Z architecture continue alongside these
+gates without changing their proof requirements.
 
-1. Complete the GPU memory manager: backing/object lifetime, map references,
-   budgets, pinning, residency, eviction, and concurrency/failure tests.
-2. Complete the Haswell Gen7.5 PPGTT path: DMA-backed page-table memory,
-   publication/synchronization, invalidation, and activation, with exact PRM
-   checks before any hardware use.
-3. Add engine-specific hardware submission and completion fences.
-4. Add VidSch contexts, queues, timeouts, and recovery.
-5. Build the independent UMD, resource management, and shader/compiler path.
-6. Integrate display/KMS independently.
-7. Complete the required compatibility work, then consider ownership transition
-   only when the independent backend is ready and tested on an isolated device.
-
-The detailed phase boundaries, including GGTT/DMA and interrupt/fence gates,
+The detailed implementation boundaries, including GGTT/DMA and interrupt/fence gates,
 are maintained in
 [`docs/design/HASWELL_GEN75_PPGTT_PLAN.md`](docs/design/HASWELL_GEN75_PPGTT_PLAN.md).
 ABI, lifetime, cleanup, rollback, and reproducible-test safeguards remain

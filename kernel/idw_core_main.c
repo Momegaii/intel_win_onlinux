@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /* IDW control plane + IDW-native miniport callback dispatcher.
- * No PCI binding, BAR mapping, DMA, MMIO, or GPU command submission here.
+ * No PCI binding, BAR mapping, MMIO, or GPU command submission here.
+ * The separate internal DMA page provider requires an IDW-owned PCI device.
  */
 #include <linux/dma-buf.h>
 #include <linux/compat.h>

@@ -1,5 +1,5 @@
 obj-m += idw_core.o
-idw_core-y := idw_core_main.o idw_ntshim.o
+idw_core-y := idw_core_main.o idw_ntshim.o idw_dma_memory.o
 obj-m += idw_test_miniport.o
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)

@@ -2,6 +2,7 @@
 /* Disposable lifecycle test miniport. No physical GPU access. */
 #include <linux/module.h>
 #include <linux/slab.h>
+#include "../include/idw/dma_memory.h"
 #include "idw_miniport.h"
 
 struct test_adapter { bool started; u64 next_id; };
@@ -50,7 +51,15 @@ static const struct idw_miniport_ops test_ops = {
 static const struct idw_miniport test_mp = { .name = "idw-test-miniport", .ops = &test_ops };
 static int __init test_init(void)
 {
-    int ret = idw_register_miniport(&test_mp);
+    struct idw_dma_provider dma_provider = {};
+    int ret = idw_dma_provider_init(&dma_provider, NULL, THIS_MODULE, 1);
+    if (ret != -EINVAL) {
+        pr_err("idw_test_miniport: DMA provider did not reject missing device scope\n");
+        return ret ? ret : -EINVAL;
+    }
+    pr_info("idw_test_miniport: DMA provider rejected missing device scope\n");
+
+    ret = idw_register_miniport(&test_mp);
     if (ret) return ret;
     ret = idw_dispatch_add_device(NULL);
     if (!ret) ret = idw_dispatch_start_device();

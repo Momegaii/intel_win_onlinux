@@ -8,7 +8,7 @@ BUILD := build
 BIN := $(BUILD)/idwctl
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
-.PHONY: all clean test contract-test backend-contract-test i915-resource-test i915-memory-backend-test gpu-submission-test memory-manager-test abi-test ppgtt-model-test cli-test gpu-test gpu-resource-test gpu-memory-test gpu-memory-manager-test install-user install-system-helper kernel kernel-clean
+.PHONY: all clean test contract-test backend-contract-test i915-resource-test i915-memory-backend-test gpu-submission-test memory-manager-test abi-test ppgtt-model-test cli-test gpu-test gpu-resource-test gpu-memory-test gpu-memory-manager-test gpu-resource-write-test install-user install-system-helper kernel kernel-clean
 all: $(BIN)
 $(BUILD)/gpuva_model.o: src/gpuva_model.c include/idw/gpuva_model.h \
 		include/idw/contracts/base.h
@@ -58,7 +58,8 @@ memory-manager-test:
 i915-memory-backend-test: $(BUILD)/gpuva_model.o
 	$(CXX) $(CPPFLAGS) -std=c++17 -Wall -Wextra -Werror -Iinclude \
 		src/memory_manager.cpp src/i915_gem_resource_backend.cpp \
-		src/i915_memory_backend.cpp tests/i915-memory-backend-test.cpp \
+		src/i915_memory_backend.cpp src/gpu_submission.cpp \
+		tests/i915-memory-backend-test.cpp \
 		$(BUILD)/gpuva_model.o -o $(BUILD)/i915-memory-backend-test $(LDLIBS)
 	./$(BUILD)/i915-memory-backend-test
 abi-test:
@@ -89,6 +90,8 @@ gpu-memory-test: all
 	./tests/gpu-memory-smoke.sh
 gpu-memory-manager-test: all
 	./tests/gpu-memory-manager-smoke.sh
+gpu-resource-write-test: all
+	./tests/gpu-resource-write-smoke.sh
 kernel:
 	$(MAKE) -C $(KDIR) M=$(CURDIR)/kernel modules
 kernel-clean:

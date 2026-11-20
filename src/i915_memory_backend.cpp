@@ -47,7 +47,7 @@ I915AssistedMemoryBackend::~I915AssistedMemoryBackend()
 MemoryBackendOps I915AssistedMemoryBackend::operations() const
 {
     return {create_backing, destroy_backing, bind, unbind, invalidate,
-            submit, wait, quiesce};
+            submit, wait, quiesce, cpu_read_dword, cpu_write_dword};
 }
 
 int I915AssistedMemoryBackend::create_backing(
@@ -106,26 +106,29 @@ int I915AssistedMemoryBackend::create_batch(uint32_t& handle)
     return resources_.create(kPageSize, handle);
 }
 
-int I915AssistedMemoryBackend::upload_noop_batch(uint32_t handle)
+int I915AssistedMemoryBackend::upload_batch(uint32_t handle,
+                                            const void *bytes,
+                                            uint32_t length)
 {
-    const uint32_t words[2] = {
-        kHaswellMiBatchBufferEnd, kHaswellMiNoop
-    };
+    if (!bytes || !length || (length & 7))
+        return -EINVAL;
     drm_i915_gem_pwrite request{};
     request.handle = handle;
     request.offset = 0;
-    request.size = sizeof(words);
-    request.data_ptr = reinterpret_cast<uint64_t>(words);
+    request.size = length;
+    request.data_ptr = reinterpret_cast<uint64_t>(bytes);
     return ioctl_result(ioctl_fn_, drm_fd_, DRM_IOCTL_I915_GEM_PWRITE,
                         &request);
 }
 
 int I915AssistedMemoryBackend::exec_resource_batch(
     uint32_t context_id, uint32_t resource_handle, idw_gpuva resource_va,
-    uint32_t batch_handle, idw_gpuva *actual_resource_va)
+    uint32_t batch_handle, uint32_t batch_length,
+    idw_gpuva *actual_resource_va)
 {
     if (!context_id || !resource_handle || !batch_handle ||
-        !actual_resource_va || (resource_va & (kPageSize - 1)))
+        !actual_resource_va || (resource_va & (kPageSize - 1)) ||
+        !batch_length || (batch_length & 7) || batch_length > kPageSize)
         return -EINVAL;
 
     drm_i915_gem_exec_object2 objects[2]{};
@@ -138,7 +141,7 @@ int I915AssistedMemoryBackend::exec_resource_batch(
     exec.buffers_ptr = reinterpret_cast<uint64_t>(objects);
     exec.buffer_count = 2;
     exec.batch_start_offset = 0;
-    exec.batch_len = kHaswellNoopBatchLength;
+    exec.batch_len = batch_length;
     exec.flags = I915_EXEC_RENDER;
     exec.rsvd1 = context_id;
     int ret = ioctl_result(ioctl_fn_, drm_fd_,
@@ -226,13 +229,19 @@ int I915AssistedMemoryBackend::bind(void *userdata, uint64_t backing,
     if (ret)
         return fail_and_rollback(ret);
     self.contexts_[context_index].pending_batch = batch_handle;
-    ret = self.upload_noop_batch(batch_handle);
+    const uint32_t noop_words[2] = {
+        kHaswellMiBatchBufferEnd, kHaswellMiNoop
+    };
+    ret = self.upload_batch(batch_handle, noop_words, sizeof(noop_words));
     if (ret)
         return fail_and_rollback(ret);
 
     idw_gpuva bound_va = requested_va;
     ret = self.exec_resource_batch(context_id, backing_handle, requested_va,
-                                   batch_handle, &bound_va);
+                                   batch_handle,
+                                   static_cast<uint32_t>(
+                                       kHaswellNoopBatchLength),
+                                   &bound_va);
     if (ret == -ERANGE) {
         self.contexts_[context_index].pending_batch_submitted = true;
         *actual_va = bound_va;
@@ -309,9 +318,11 @@ int I915AssistedMemoryBackend::invalidate(void *, idw_gpuva, uint64_t)
 
 int I915AssistedMemoryBackend::submit(void *userdata, uint64_t backing,
                                       idw_gpuva va, uint64_t bytes,
+                                      const MemorySubmissionCommand& command,
                                       uint64_t *fence)
 {
-    if (!userdata || !backing || backing > UINT32_MAX || !fence || !bytes)
+    if (!userdata || !backing || backing > UINT32_MAX || !fence ||
+        bytes < sizeof(uint32_t))
         return -EINVAL;
     auto& self = *static_cast<I915AssistedMemoryBackend *>(userdata);
     size_t context_index = 0;
@@ -334,7 +345,33 @@ int I915AssistedMemoryBackend::submit(void *userdata, uint64_t backing,
     ret = self.create_batch(batch_handle);
     if (ret)
         return ret;
-    ret = self.upload_noop_batch(batch_handle);
+    uint32_t batch_words[6]{};
+    uint32_t batch_length = static_cast<uint32_t>(
+        kHaswellNoopBatchLength);
+    if (command.kind == MemorySubmissionKind::Noop) {
+        if (command.offset || command.value) {
+            ret = -EINVAL;
+        } else {
+            batch_words[0] = kHaswellMiBatchBufferEnd;
+            batch_words[1] = kHaswellMiNoop;
+        }
+    } else if (command.kind == MemorySubmissionKind::WriteDword) {
+        if ((command.offset & (sizeof(uint32_t) - 1)) ||
+            command.offset > bytes - sizeof(uint32_t) ||
+            va > UINT64_MAX - command.offset) {
+            ret = -EINVAL;
+        } else {
+            batch_length = static_cast<uint32_t>(
+                kHaswellStoreDwordBatchLength);
+            ret = build_haswell_store_dword_batch(
+                va + command.offset, command.value, batch_words,
+                kHaswellStoreDwordBatchLength);
+        }
+    } else {
+        ret = -EINVAL;
+    }
+    if (!ret)
+        ret = self.upload_batch(batch_handle, batch_words, batch_length);
     if (ret) {
         const int close_ret = self.close_batch(batch_handle);
         return close_ret ? close_ret : ret;
@@ -343,7 +380,7 @@ int I915AssistedMemoryBackend::submit(void *userdata, uint64_t backing,
     idw_gpuva actual_va = va;
     ret = self.exec_resource_batch(context.context_id,
                                    static_cast<uint32_t>(backing), va,
-                                   batch_handle, &actual_va);
+                                   batch_handle, batch_length, &actual_va);
     if (ret && ret != -ERANGE) {
         const int close_ret = self.close_batch(batch_handle);
         return close_ret ? close_ret : ret;
@@ -411,6 +448,58 @@ int I915AssistedMemoryBackend::quiesce(void *userdata, uint64_t token)
     size_t index = 0;
     int ret = self.find_fence(token, index);
     return ret ? ret : self.finish_fence(index, kInfiniteWait);
+}
+
+int I915AssistedMemoryBackend::cpu_read_dword(void *userdata,
+                                               uint64_t backing,
+                                               uint64_t offset,
+                                               uint32_t *value)
+{
+    if (!userdata || !backing || backing > UINT32_MAX || !value ||
+        (offset & (sizeof(uint32_t) - 1)))
+        return -EINVAL;
+    auto& self = *static_cast<I915AssistedMemoryBackend *>(userdata);
+    I915ResourceSnapshot snapshot{};
+    int ret = self.resources_.snapshot(static_cast<uint32_t>(backing),
+                                      snapshot);
+    if (ret)
+        return ret;
+    if (offset > snapshot.size - sizeof(*value))
+        return -EINVAL;
+
+    drm_i915_gem_pread request{};
+    request.handle = static_cast<uint32_t>(backing);
+    request.offset = offset;
+    request.size = sizeof(*value);
+    request.data_ptr = reinterpret_cast<uint64_t>(value);
+    return ioctl_result(self.ioctl_fn_, self.drm_fd_,
+                        DRM_IOCTL_I915_GEM_PREAD, &request);
+}
+
+int I915AssistedMemoryBackend::cpu_write_dword(void *userdata,
+                                                uint64_t backing,
+                                                uint64_t offset,
+                                                uint32_t value)
+{
+    if (!userdata || !backing || backing > UINT32_MAX ||
+        (offset & (sizeof(uint32_t) - 1)))
+        return -EINVAL;
+    auto& self = *static_cast<I915AssistedMemoryBackend *>(userdata);
+    I915ResourceSnapshot snapshot{};
+    int ret = self.resources_.snapshot(static_cast<uint32_t>(backing),
+                                      snapshot);
+    if (ret)
+        return ret;
+    if (offset > snapshot.size - sizeof(value))
+        return -EINVAL;
+
+    drm_i915_gem_pwrite request{};
+    request.handle = static_cast<uint32_t>(backing);
+    request.offset = offset;
+    request.size = sizeof(value);
+    request.data_ptr = reinterpret_cast<uint64_t>(&value);
+    return ioctl_result(self.ioctl_fn_, self.drm_fd_,
+                        DRM_IOCTL_I915_GEM_PWRITE, &request);
 }
 
 int I915AssistedMemoryBackend::close_all()

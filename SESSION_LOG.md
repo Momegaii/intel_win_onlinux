@@ -464,3 +464,104 @@ AddressSanitizer/UndefinedBehaviorSanitizer runs with leak detection, GCC
 passed again after the final code changes. `/dev/idw`-dependent tests skipped;
 no kernel module was loaded. The build retains the existing libdrm header
 `-Wpedantic` warnings.
+
+## IDW 0.9.0 — GPU resource read/write verification
+
+### Haswell command-source verification
+
+Before any physical write submission, verified the encoding against Intel
+Corporation's *Intel Open Source Graphics Programmer's Reference Manual (PRM)
+for the 2013 Intel Core Processor Family, Volume 2b: Command Reference:
+Instructions (Command Opcodes) (Haswell)*, dated 2014-01-21. The
+`MI_STORE_DATA_IMM` RenderCS entry is on printed pages 236-238:
+
+- DWord length is 2 (total command size is four dwords): header, reserved
+  dword, 32-bit graphics address, and immediate data.
+- Header `0x10000002` encodes MI opcode `20h`, a DWord-sized command, and leaves
+  Use Global GTT clear; the PRM says that selects PPGTT address translation.
+- The target field is address bits 31:2, with DWord alignment required.
+- `MI_BATCH_BUFFER_END` is documented for RenderCS on printed page 194. The
+  batch appends it after the store and a `MI_NOOP` pad, making the 24-byte
+  batch length 8-byte aligned.
+
+The Intel manual PDF was retrieved from the [Intel graphics PRM index mirror]
+(https://kiwitree.net/~lina/intel-gfx-docs/prm/), whose index identifies itself
+as mirroring Intel's official PDFs; the PDF itself carries Intel Corporation
+copyright and metadata. Intel's [official PRM landing page]
+(https://www.intel.com/content/www/us/en/docs/graphics-for-linux/developer-reference/1-0/overview.html)
+no longer lists the archived Haswell document.
+
+The PRM also notes that `MI_STORE_DATA_IMM` initiates the write and that its
+completion is eventual rather than synchronized with following command
+execution. Therefore the test waits for GEM batch completion and then polls
+CPU GEM_PREAD at 1 ms intervals for up to five seconds; it does not infer store
+visibility solely from GEM_WAIT.
+
+### Implementation and evidence
+
+- Extended the existing `MemoryManager` and i915 backend rather than adding a
+  parallel resource/context subsystem. The manager now validates aligned
+  in-bounds dword CPU accesses and managed write submissions, retaining its
+  submission reference until wait or quiescence. The i915 adapter emits only
+  the documented Gen7.5 command, pins the managed GEM object at its context VA,
+  submits through the existing context, and uses public GEM_PWRITE/PREAD and
+  GEM_WAIT ioctls.
+- Added command construction/validation for the fixed 24-byte Haswell batch,
+  including malformed header/reserved/end/padding, alignment, address-width,
+  and length checks. The simulated i915 ioctl test emulates only that command's
+  write into the named resource and covers bounds rejection, failed exec,
+  failed PREAD, timed-out wait followed by quiescence, held references, and
+  cleanup.
+- Added opt-in `make gpu-resource-write-test` /
+  `idwctl gpu-resource-write-test`, restricted to Haswell `8086:0412` with i915
+  bound. It initializes a resource dword to `0x13579bdf`, submits a write of
+  `0x2468ace0` at resource offset 16, waits, reads it back through PREAD, then
+  unbinds and destroys the manager-owned resource.
+- Physical result on 2026-11-20: **PASS** on Haswell `8086:0412` with i915.
+  The manager-selected resource GPU VA was `0x10000000`; the GPU wrote offset
+  16 (GPU VA `0x10000010`). CPU readback observed exactly `0x2468ace0`, changed
+  from the initialized `0x13579bdf`. The test cleaned up the context, GEM
+  backing, and DRM fd. This proves an i915-assisted GPU write/readback for this
+  resource, not IDW-owned DMA, PPGTT, translation, scheduling, or execution.
+
+Validation completed:
+
+- `make i915-memory-backend-test gpu-submission-test memory-manager-test`
+  passed, including malformed encoding and simulated failure/recovery cases.
+- `bash -n tests/gpu-resource-write-smoke.sh` passed.
+- `make gpu-resource-write-test` passed on physical Haswell/i915 with the exact
+  readback above.
+- `make test` passed. Tests requiring `/dev/idw` skipped because that device
+  node is absent. Existing `-Wpedantic` warnings remain confined to system
+  libdrm headers.
+- AddressSanitizer and UndefinedBehaviorSanitizer with leak detection passed
+  for the simulated i915-memory-backend and MemoryManager test binaries.
+- Final `git diff --check` passed. No kernel module was loaded and no i915
+  ownership or binding change was made.
+
+## Stage 2 — native DMA provider progress
+
+Added an internal kernel DMA page provider in `include/idw/dma_memory.h` and
+`kernel/idw_dma_memory.c`. It accepts only a PCI device whose current driver's
+module matches the explicitly supplied owner, requires the owner to have
+configured both streaming and coherent masks for the Haswell 40-bit DMA range,
+allocates zeroed 4 KiB pages with `dma_alloc_coherent`, validates CPU/DMA
+alignment and the complete DMA-address range, and returns device-cookie,
+generation, and per-page lifetime-cookie metadata. Free validates the exact
+scope and descriptor; provider teardown frees any remaining pages. Provider
+init is intended for the owning driver's probe, and teardown for remove after
+the hardware is quiesced. This is separate from the CPU system-memory and
+i915-assisted GEM paths.
+
+The disposable test miniport also includes a negative check that provider
+initialization rejects a missing device scope. It is compiled into the test
+module but has not been executed because no kernel module was loaded.
+
+Validation: `make test`, `make kernel`, and a warning-enabled (`W=1`) Kbuild
+compiled and linked the modules against the running kernel headers. No module
+was loaded and no DMA allocation or map was executed. The current IDW module
+has no PCI binding/owned GPU device, while Haswell remains bound to i915.
+Therefore the provider's real device allocation and DMA-address result remain
+unverified and Stage 2 is **in progress, not complete**. It is not wired into
+the CPU PPGTT model or the native DMA contract yet. Stage 3 must wait for real
+Stage 2 device-scoped allocations and hardware visibility evidence.

@@ -247,6 +247,21 @@ int MemoryManager::recover_binding(idw_handle handle)
 
 int MemoryManager::submit(idw_handle handle, uint64_t& ticket)
 {
+    return submit_command(handle, {MemorySubmissionKind::Noop, 0, 0}, ticket);
+}
+
+int MemoryManager::submit_write_dword(idw_handle handle, uint64_t offset,
+                                      uint32_t value, uint64_t& ticket)
+{
+    return submit_command(handle,
+                          {MemorySubmissionKind::WriteDword, offset, value},
+                          ticket);
+}
+
+int MemoryManager::submit_command(idw_handle handle,
+                                  const MemorySubmissionCommand& command,
+                                  uint64_t& ticket)
+{
     if (!initialized_ || next_ticket_ == 0)
         return -EINVAL;
     if (mapping_mismatch_)
@@ -258,6 +273,19 @@ int MemoryManager::submit(idw_handle handle, uint64_t& ticket)
     Resource& resource = resources_[resource_index];
     if (resource.binding_state != BindingState::Bound)
         return -EINVAL;
+    switch (command.kind) {
+    case MemorySubmissionKind::Noop:
+        if (command.offset || command.value)
+            return -EINVAL;
+        break;
+    case MemorySubmissionKind::WriteDword:
+        if ((command.offset & (sizeof(uint32_t) - 1)) ||
+            command.offset > resource.bytes - sizeof(uint32_t))
+            return -EINVAL;
+        break;
+    default:
+        return -EINVAL;
+    }
     if (resource.references == std::numeric_limits<uint32_t>::max())
         return -EOVERFLOW;
     if (submissions_.size() == submissions_.max_size())
@@ -274,7 +302,7 @@ int MemoryManager::submit(idw_handle handle, uint64_t& ticket)
     uint64_t fence = 0;
     ret = callback_status(ops_.submit(userdata_, resource.backing,
                                       resource.backend_va, resource.bytes,
-                                      &fence));
+                                      command, &fence));
     if (ret && ret != -EUCLEAN) {
         --resource.references;
         submissions_.pop_back();
@@ -286,6 +314,48 @@ int MemoryManager::submit(idw_handle handle, uint64_t& ticket)
     if (ret == -EUCLEAN)
         return ret;
     return fence ? 0 : -EPROTO;
+}
+
+int MemoryManager::cpu_read_dword(idw_handle handle, uint64_t offset,
+                                  uint32_t& value)
+{
+    if (!initialized_)
+        return -EINVAL;
+    size_t index = 0;
+    int ret = find_resource(handle, index);
+    if (ret)
+        return ret;
+    const Resource& resource = resources_[index];
+    if ((offset & (sizeof(uint32_t) - 1)) ||
+        offset > resource.bytes - sizeof(uint32_t))
+        return -EINVAL;
+    if (resource.references)
+        return -EBUSY;
+    if (!ops_.cpu_read_dword)
+        return -EOPNOTSUPP;
+    return callback_status(ops_.cpu_read_dword(userdata_, resource.backing,
+                                               offset, &value));
+}
+
+int MemoryManager::cpu_write_dword(idw_handle handle, uint64_t offset,
+                                   uint32_t value)
+{
+    if (!initialized_)
+        return -EINVAL;
+    size_t index = 0;
+    int ret = find_resource(handle, index);
+    if (ret)
+        return ret;
+    const Resource& resource = resources_[index];
+    if ((offset & (sizeof(uint32_t) - 1)) ||
+        offset > resource.bytes - sizeof(uint32_t))
+        return -EINVAL;
+    if (resource.references)
+        return -EBUSY;
+    if (!ops_.cpu_write_dword)
+        return -EOPNOTSUPP;
+    return callback_status(ops_.cpu_write_dword(userdata_, resource.backing,
+                                                offset, value));
 }
 
 int MemoryManager::release_submission(size_t index)

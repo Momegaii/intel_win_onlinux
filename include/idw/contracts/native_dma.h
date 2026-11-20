@@ -8,10 +8,10 @@
 #define IDW_NATIVE_DMA_CONTRACT_VERSION 1u
 
 /*
- * Future Linux-kernel backend contract. The device scope must come from the
- * exclusively owned PCI device's DMA lifecycle. A DMA API address from i915
- * or another device is invalid here. This declaration has no implementation
- * and does not authorize PCI binding, BAR access, or hardware takeover.
+ * Native backend contract. The device scope must come from the exclusively
+ * owned PCI device's DMA lifecycle. A DMA API address from i915 or another
+ * device is invalid here. The kernel DMA page provider is not yet wired to
+ * this contract and does not authorize PCI binding, BAR access, or takeover.
  */
 struct idw_native_dma_contract {
     uint32_t size;

@@ -10,6 +10,17 @@
 
 namespace idw {
 
+enum class MemorySubmissionKind {
+    Noop,
+    WriteDword
+};
+
+struct MemorySubmissionCommand {
+    MemorySubmissionKind kind;
+    uint64_t offset;
+    uint32_t value;
+};
+
 struct MemoryBackendOps {
     /*
      * Callbacks return zero or negative errno. Failed create/bind/submit
@@ -31,10 +42,15 @@ struct MemoryBackendOps {
                   uint64_t bytes);
     int (*invalidate)(void *userdata, idw_gpuva va, uint64_t bytes);
     int (*submit)(void *userdata, uint64_t backing, idw_gpuva va,
-                  uint64_t bytes, uint64_t *fence);
+                  uint64_t bytes, const MemorySubmissionCommand& command,
+                  uint64_t *fence);
     int (*wait)(void *userdata, uint64_t fence, int64_t timeout_ns);
     /* Return success only when the backend guarantees the fence is quiescent. */
     int (*quiesce)(void *userdata, uint64_t fence);
+    int (*cpu_read_dword)(void *userdata, uint64_t backing, uint64_t offset,
+                          uint32_t *value);
+    int (*cpu_write_dword)(void *userdata, uint64_t backing, uint64_t offset,
+                           uint32_t value);
 };
 
 struct MemoryResourceInfo {
@@ -68,6 +84,10 @@ public:
      * retained. A successful submit returning fence zero also sets ticket.
      */
     int submit(idw_handle handle, uint64_t& ticket);
+    int submit_write_dword(idw_handle handle, uint64_t offset, uint32_t value,
+                           uint64_t& ticket);
+    int cpu_read_dword(idw_handle handle, uint64_t offset, uint32_t& value);
+    int cpu_write_dword(idw_handle handle, uint64_t offset, uint32_t value);
     /* A failed wait retains the reference until wait succeeds or quiesce does. */
     int wait(uint64_t ticket, int64_t timeout_ns);
     /* Also recovers a successful submit callback that returned an invalid fence. */
@@ -104,6 +124,9 @@ private:
 
     int find_resource(idw_handle handle, size_t& index) const;
     int find_submission(uint64_t ticket, size_t& index) const;
+    int submit_command(idw_handle handle,
+                       const MemorySubmissionCommand& command,
+                       uint64_t& ticket);
     int release_submission(size_t index);
     int finish_unbind(Resource& resource);
 

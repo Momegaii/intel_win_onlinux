@@ -41,7 +41,17 @@ Added compile-checked internal contracts for NT runtime, DXGK-inspired dispatche
 Version: 1.0.0-system-memory
 UAPI 0.4 adds opt-in page-aligned, zeroed kernel system-memory allocations with shared userspace mappings. Mapped handles reject explicit destruction with EBUSY; file-close cleanup and VMA references preserve backing until unmap. Per-open handles are monotonically increasing and reject stale reuse. Runtime validation passed on the target kernel, including metadata-only mmap rejection, mapped-memory lifetime, dma-buf import lifetime, and the disposable miniport lifecycle. This is CPU memory only; IDW still does not DMA-map or GPU-map the allocation and i915 remains the hardware owner.
 
-Next development sequence: GPU memory management (real GPU VAs, mappings, residency, eviction); Haswell Gen7.5 PPGTT; engine submission; scheduler; UMD; independent display/KMS; then ownership transition after backend readiness. Added opt-in `gpu-memory-test` to validate fixed GPU-VA placement and GEM backing advice through i915. This is validation only; i915 still owns page tables and GPU residency.
+Current eight-stage development sequence and evidence:
+1. GPU resource read/write — COMPLETE for the i915-assisted path. On Haswell `8086:0412`, a Gen7.5 `MI_STORE_DATA_IMM` command wrote `0x2468ace0` at resource offset 16; CPU PREAD returned the exact value after GEM_WAIT. This does not establish IDW-owned execution.
+2. Native DMA — IN PROGRESS, NOT PROVEN. Added a kernel DMA-coherent page provider that requires a PCI device bound to its owning IDW driver, verifies the configured 40-bit streaming/coherent DMA masks, checks returned page alignment/address range, and tracks device generation/allocation lifetime. It was compile-checked but not exercised: IDW has no PCI binding and i915 remains bound. Required proof: a real allocation/map on an exclusively IDW-owned device, followed by verified cleanup.
+3. Hardware PPGTT — NOT IMPLEMENTED. Required proof: the GPU uses IDW-created Haswell Gen7.5 page tables.
+4. Independent submission — NOT IMPLEMENTED. Required proof: IDW submits and completes commands without i915 graphics execution.
+5. Scheduler — NOT IMPLEMENTED. Required proof: multiple contexts, queues, timeout handling and recovery.
+6. UMD — NOT IMPLEMENTED. Required proof: real shader compilation and rendering.
+7. Display/KMS — NOT IMPLEMENTED. Required proof: an IDW-controlled display pipeline.
+8. Ownership transition — NOT ATTEMPTED. Required proof: safely detach i915 and give IDW exclusive hardware control only after the independent backend is ready.
+
+i915 remains bound and is the physical GPU owner. The CPU PPGTT model is not hardware page-table evidence; current GPU execution and address mappings are i915-assisted. Detailed Stage 1 results are recorded in `SESSION_LOG.md`.
 
 Hardware validation status at this historical checkpoint: `gpu-memory-test` had not yet been run on the physical GPU. The later execution milestone and hardware evidence are recorded at the end of this file. Source audit confirms `retained` is a point-in-time backing-exists result; the test checks both DONTNEED and subsequent WILLNEED results to catch purge between calls.
 
@@ -62,3 +72,19 @@ Implemented CPU-only GPU-VA interval allocation in `src/gpuva_model.c` and a Gen
 Hardware execution evidence, separate from software tests: final sequential `IDW_GPU_SUBMIT_COUNT=3 make gpu-test` passed on `/dev/dri/renderD128`, Haswell `8086:0412`, with i915 bound. Three submissions completed, each successful `GEM_WAIT`; context ID 1 was used and the final reported i915 GPU VA was `0x011a66000` (4 KiB aligned). GEM handles and context cleanup succeeded. `make gpu-memory-test` then passed: i915 bound the resource/batch objects at `0x10000000` / `0x10100000`, completed the initial and rebound no-op submissions, and released the context. `Backing purge observed: no`; DONTNEED advice did not demonstrate forced eviction. These results validate i915-assisted command execution and completion only. i915 still owns GPU address translation, PPGTT, DMA, scheduling, and residency; no independent IDW execution or ownership is demonstrated.
 
 Software validation for this milestone: `make test`, `make kernel`, `make gpu-submission-test`, GCC `-fanalyzer` on submission/integration code, and ASan/UBSan with leak detection for submission failure/timeout/cleanup paths passed. Tests cover malformed batches, failed exec, simulated timeout, invalid GPU VA, partial GEM/context creation, and cleanup failures. `/dev/idw` tests still skipped because the module was not loaded; system libdrm headers retain external `-Wpedantic` warnings.
+
+2026-11-20 GPU resource read/write and Stage 2 DMA-provider progress: the
+i915-assisted Haswell `MI_STORE_DATA_IMM` test wrote `0x2468ace0` to a
+MemoryManager-owned GEM resource at GPU VA `0x10000010`; after GEM_WAIT, CPU
+PREAD returned that exact value, replacing the initial `0x13579bdf`. This
+proves Stage 1 only with i915 owning resource backing, address mapping, command
+execution and completion. Stage 2 adds an ownership-checked internal
+`dma_alloc_coherent` page provider for an IDW-owned PCI device, including
+40-bit range/alignment checks and device-generation/allocation cookies. `make
+test`, standard kernel build and warning-enabled (`W=1`) Kbuild passed. The
+test miniport includes a compiled negative check for provider initialization
+without device scope, but it was not run because no kernel module was loaded.
+No actual IDW-owned DMA allocation or map was exercised; IDW has no PCI binding
+and Haswell remains bound to i915. Stage 2 is in progress, not complete;
+Stages 3–8 remain unproven/not implemented, and no ownership transition was
+attempted.

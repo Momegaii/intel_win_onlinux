@@ -3,6 +3,8 @@
 
 #include <cerrno>
 #include <cstdio>
+#include <unordered_map>
+#include <vector>
 
 namespace {
 
@@ -23,6 +25,7 @@ struct FakeBackend {
     bool partial_submit = false;
     uint32_t live_backings = 0;
     uint32_t live_bindings = 0;
+    std::unordered_map<uint64_t, std::vector<uint32_t>> contents;
 };
 
 int create_backing(void *data, uint64_t bytes, uint64_t *backing)
@@ -34,15 +37,18 @@ int create_backing(void *data, uint64_t bytes, uint64_t *backing)
         return -EINVAL;
     *backing = fake.next_backing++;
     ++fake.live_backings;
+    fake.contents.emplace(*backing,
+                          std::vector<uint32_t>(bytes / sizeof(uint32_t)));
     return 0;
 }
 
-int destroy_backing(void *data, uint64_t)
+int destroy_backing(void *data, uint64_t backing)
 {
     auto& fake = *static_cast<FakeBackend *>(data);
     if (fake.fail_destroy)
         return fake.fail_destroy;
     --fake.live_backings;
+    fake.contents.erase(backing);
     return 0;
 }
 
@@ -74,15 +80,50 @@ int invalidate(void *data, idw_gpuva, uint64_t)
     return fake.fail_invalidate;
 }
 
-int submit_resource(void *data, uint64_t, idw_gpuva, uint64_t,
+int submit_resource(void *data, uint64_t backing, idw_gpuva, uint64_t bytes,
+                    const idw::MemorySubmissionCommand& command,
                     uint64_t *fence)
 {
     auto& fake = *static_cast<FakeBackend *>(data);
     if (fake.fail_submit)
         return fake.fail_submit;
+    if (command.kind == idw::MemorySubmissionKind::WriteDword) {
+        if (command.offset > bytes - sizeof(uint32_t) ||
+            (command.offset & (sizeof(uint32_t) - 1)))
+            return -EINVAL;
+        fake.contents[backing][command.offset / sizeof(uint32_t)] =
+            command.value;
+    } else if (command.kind != idw::MemorySubmissionKind::Noop ||
+               command.offset || command.value) {
+        return -EINVAL;
+    }
     *fence = fake.zero_fence ? 0 : fake.next_fence++;
     if (fake.partial_submit)
         return -EUCLEAN;
+    return 0;
+}
+
+int cpu_read_dword(void *data, uint64_t backing, uint64_t offset,
+                   uint32_t *value)
+{
+    auto& contents = static_cast<FakeBackend *>(data)->contents;
+    const auto it = contents.find(backing);
+    if (!value || it == contents.end() ||
+        offset / sizeof(uint32_t) >= it->second.size())
+        return -EINVAL;
+    *value = it->second[offset / sizeof(uint32_t)];
+    return 0;
+}
+
+int cpu_write_dword(void *data, uint64_t backing, uint64_t offset,
+                    uint32_t value)
+{
+    auto& contents = static_cast<FakeBackend *>(data)->contents;
+    const auto it = contents.find(backing);
+    if (it == contents.end() ||
+        offset / sizeof(uint32_t) >= it->second.size())
+        return -EINVAL;
+    it->second[offset / sizeof(uint32_t)] = value;
     return 0;
 }
 
@@ -102,7 +143,8 @@ int quiesce_fence(void *data, uint64_t)
 
 const idw::MemoryBackendOps kOps{
     create_backing, destroy_backing, bind_resource, unbind_resource,
-    invalidate, submit_resource, wait_fence, quiesce_fence
+    invalidate, submit_resource, wait_fence, quiesce_fence,
+    cpu_read_dword, cpu_write_dword
 };
 
 #define CHECK(condition) do { \
@@ -211,6 +253,43 @@ int test_mapping_failures_and_recovery()
     return 0;
 }
 
+int test_managed_dword_access_and_write_submission()
+{
+    constexpr uint32_t initial_value = 0x13579bdf;
+    constexpr uint32_t gpu_value = 0x2468ace0;
+    FakeBackend fake;
+    idw::MemoryManager manager;
+    idw_handle resource = 0;
+    idw_gpuva va = 0;
+    uint64_t ticket = 0;
+    uint32_t readback = 0;
+
+    CHECK(manager.initialize(kOps, &fake, 0x10000, 0x20000) == 0);
+    CHECK(manager.create(4096, resource) == 0);
+    CHECK(manager.bind(resource, 0, va) == 0);
+    CHECK(manager.cpu_write_dword(resource, 4, initial_value) == 0);
+    CHECK(manager.cpu_read_dword(resource, 4, readback) == 0);
+    CHECK(readback == initial_value);
+    CHECK(manager.cpu_write_dword(resource, 1, gpu_value) == -EINVAL);
+    CHECK(manager.cpu_read_dword(resource, 4096, readback) == -EINVAL);
+    CHECK(manager.submit_write_dword(resource, 1, gpu_value, ticket) ==
+          -EINVAL);
+    CHECK(manager.submit_write_dword(resource, 4096, gpu_value, ticket) ==
+          -EINVAL);
+
+    CHECK(manager.submit_write_dword(resource, 4, gpu_value, ticket) == 0);
+    CHECK(manager.cpu_read_dword(resource, 4, readback) == -EBUSY);
+    CHECK(manager.cpu_write_dword(resource, 4, initial_value) == -EBUSY);
+    CHECK(manager.wait(ticket, 1000000) == 0);
+    CHECK(manager.cpu_read_dword(resource, 4, readback) == 0);
+    CHECK(readback == gpu_value);
+    CHECK(manager.unbind(resource) == 0);
+    CHECK(manager.destroy(resource) == 0);
+    CHECK(manager.shutdown() == 0);
+    CHECK(fake.contents.empty());
+    return 0;
+}
+
 int test_submission_failure_timeout_and_cleanup()
 {
     FakeBackend fake;
@@ -307,6 +386,7 @@ int test_validation_and_shutdown_guards()
 int main()
 {
     if (test_complete_lifecycle() || test_mapping_failures_and_recovery() ||
+        test_managed_dword_access_and_write_submission() ||
         test_submission_failure_timeout_and_cleanup() ||
         test_validation_and_shutdown_guards())
         return 1;

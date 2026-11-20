@@ -9,7 +9,9 @@ namespace idw {
 
 constexpr uint32_t kHaswellMiBatchBufferEnd = 0x05000000u;
 constexpr uint32_t kHaswellMiNoop = 0x00000000u;
+constexpr uint32_t kHaswellMiStoreDataImmDword = 0x10000002u;
 constexpr size_t kHaswellNoopBatchLength = 2 * sizeof(uint32_t);
+constexpr size_t kHaswellStoreDwordBatchLength = 6 * sizeof(uint32_t);
 constexpr uint64_t kGpuPageSize = 4096;
 constexpr int64_t kDefaultGpuWaitTimeoutNs = 5LL * 1000 * 1000 * 1000;
 
@@ -54,6 +56,10 @@ struct GpuSubmissionResult {
 
 const char *gpu_submission_stage_name(GpuSubmissionStage stage);
 int validate_haswell_noop_batch(const void *bytes, size_t length);
+int build_haswell_store_dword_batch(uint64_t gpu_va, uint32_t value,
+                                    void *bytes, size_t length);
+int validate_haswell_store_dword_batch(const void *bytes, size_t length,
+                                       uint64_t *gpu_va, uint32_t *value);
 
 int submit_haswell_noop_batches(const GpuSubmissionOps& ops, void *userdata,
                                 const void *batch, size_t batch_length,
