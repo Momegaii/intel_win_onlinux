@@ -99,7 +99,7 @@ Haswell is Gen 7.5. Do not assume Gen8+ address-space or command-stream features
 |---|---|---|---|
 | 1 | GPU resource read/write | GPU writes data into a managed resource; CPU reads back the exact result. | Complete for the i915-assisted path: Haswell `8086:0412` wrote `0x2468ace0` at resource offset 16 and CPU read it back exactly. |
 | 2 | Native DMA | IDW allocates and maps real DMA memory for its exclusively owned PCI device. | In progress: QEMU EDU virtual-device DMA, page-table DMA copy, and provider cleanup passed on TCG. Physical Haswell DMA remains unproven; i915 remains bound. See `tests/qemu-dma/evidence-2026-11-20-tcg-page-table.log`. |
-| 3 | Hardware PPGTT | GPU uses IDW-created Haswell Gen7.5 page tables. | Not implemented; the PPGTT model can use DMA-backed page-table storage, and the QEMU test verified a page-table DMA copy, but there is no hardware publication, invalidation, or VM activation, and i915 owns hardware mappings. |
+| 3 | Hardware PPGTT | GPU uses IDW-created Haswell Gen7.5 page tables. | Not implemented. The 2026-11-20 PRM readiness audit is complete and the reversible experiment is designed, but GGTT-resident PDEs, separate 40-bit PDE/39-bit PTE limits, scratch-PDE retention, and register-level invalidation/activation are still missing. i915 owns hardware mappings. See `docs/design/HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md`. |
 | 4 | Independent submission | IDW submits and completes commands without i915 graphics execution. | Not implemented; all demonstrated execution is i915-assisted. |
 | 5 | Scheduler | Multiple contexts, queues, timeout and recovery. | Not implemented independently; existing context/fence tests do not establish an IDW scheduler. |
 | 6 | UMD | Real shader compilation and rendering. | Not implemented. |
@@ -114,6 +114,12 @@ remains the sole hardware owner. Run it explicitly with `make gpu-memory-test`.
 The independence-first implementation stages, Gen7.5 PPGTT architecture,
 hardware-backend interfaces, failure/rollback rules, and validation gates are
 specified in [`docs/design/HASWELL_GEN75_PPGTT_PLAN.md`](docs/design/HASWELL_GEN75_PPGTT_PLAN.md).
+The 2026-11-20 physical-readiness audit, register ownership map, and minimal
+reversible page-walk experiment are in
+[`docs/design/HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md`](docs/design/HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md).
+That audit found that the current shared PDE/PTE encoder, 40-bit mapped-page
+limit, CPU-resident page directory, and live PDE removal are not yet
+hardware-safe; no hardware state was changed and i915 remains bound.
 The CPU-only GPU-VA interval allocator and Haswell Gen7.5 PPGTT software model
 are implemented in `src/gpuva_model.c` and `src/haswell_ppgtt_model.c`; run
 `make ppgtt-model-test` for their unit tests. They use synthetic DMA addresses

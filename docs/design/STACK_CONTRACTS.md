@@ -85,11 +85,14 @@ The eight-stage proof gates are summarized in the README and
 `docs/IMPLEMENTATION_STATUS.md`. Compatibility work in the A–Z architecture
 continues alongside these hardware milestones. The detailed implementation
 plan and Gen7.5 PPGTT evidence gates are in
-`HASWELL_GEN75_PPGTT_PLAN.md`. Independence is the design target from stage 1;
-i915 is only a temporary validation owner. Operational ownership restrictions
-may be relaxed only on an isolated test system with exclusive device ownership.
-Do not trade away source validation, lifetime rules, cleanup, rollback, or
-reproducible tests.
+`HASWELL_GEN75_PPGTT_PLAN.md`. The 2026-11-20 physical-readiness audit,
+register ownership map, and reversible page-walk experiment are in
+`HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md`; that audit is documentation and
+planning only, not hardware validation. Independence is the design target from
+stage 1; i915 is only a temporary validation owner. Operational ownership
+restrictions may be relaxed only on an isolated test system with exclusive
+device ownership. Do not trade away source validation, lifetime rules, cleanup,
+rollback, or reproducible tests.
 
 ## Public/internal interfaces added in this milestone
 

@@ -711,3 +711,34 @@ The full serial output is preserved at
 closes the previously open QEMU page-table evidence gap. It remains QEMU
 virtual-device DMA evidence, not physical Haswell DMA or hardware PPGTT; Stage
 2 remains in progress and Stage 3 remains not started.
+
+### Physical Haswell PPGTT readiness audit
+
+Audited the Gen7.5 PPGTT model and DMA storage adapter against the Intel
+Haswell PRM (Memory Views and Command Reference: Registers) and Linux v6.12
+i915. Added `docs/design/HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md` with the
+evidence-separated audit, physical page-directory/page-table requirements,
+register ownership map, safe i915-bound validation, a minimal reversible
+page-walk experiment, recovery procedures, and unresolved questions.
+
+The audit confirms the two-level 4 KiB geometry but found four physical
+blockers:
+
+- PDE bits 11:4 carry physical address 39:32. PTE bits 10:4 carry physical
+  address 38:32; PTE bit 11 is cacheability control bit 3. The current shared
+  `0xff0` encoder is valid for PDEs but not PTEs.
+- Mapped pages are limited to 39-bit addresses; page tables may be addressed
+  below 2^40. The model and adapter currently accept 40-bit mapped pages.
+- The page directory must reside entirely in the GGTT and PDEs must be modified
+  through GTTADDR. The model keeps `directory[512]` in CPU memory.
+- Live PDE removal is not hardware-safe because directory entries are cached
+  and cannot be invalidated on the fly. i915 keeps the PDE valid and clears
+  PTEs to a scratch entry; the model retires and frees the table.
+
+Register-level activation and invalidation (`PP_DCLV`, `PP_DIR_BASE`,
+per-engine PPGTT enable, `INSTPM` TLB invalidate plus sync flush, and
+`GFX_FLSH_CNTL_GEN6`) remain absent and i915-owned. No hardware state was
+changed, i915 was not unbound, no PPGTT register was programmed, and no
+physical GPU page walk is claimed. Stage 3 remains not implemented; the next
+gate is review and correction of the software model and contracts, not a
+hardware run.

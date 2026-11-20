@@ -3,6 +3,24 @@ Version: 0.5.0-resource-lifecycle
 Target: Intel HD Graphics 4600 / Haswell GT2 / PCI 8086:0412
 Host driver ownership: i915
 
+2026-11-20 physical Haswell PPGTT readiness audit:
+Audited the Gen7.5 PPGTT model and DMA storage adapter against the Intel
+Haswell PRM (Memory Views; Command Reference: Registers) and Linux v6.12 i915.
+The audit confirms the two-level 4 KiB/1024-PTE/512-PDE geometry but found
+four physical blockers: PDE and PTE address encodings differ (PDE bits 11:4 are
+address 39:32; PTE bits 10:4 are address 38:32 and bit 11 is cacheability);
+mapped pages are limited to 39-bit addresses while page tables may be 40-bit;
+the page directory must reside in the GGTT and be written through GTTADDR; and
+live PDE removal is unsafe because the hardware caches directory entries.
+Register-level activation/invalidation (`PP_DCLV`, `PP_DIR_BASE`, per-engine
+PPGTT enable, `INSTPM` TLB invalidate/sync flush, GGTT flush) is absent and all
+involved registers remain i915-owned. No hardware state was changed, i915 was
+not unbound, and no physical page walk is claimed. The evidence-separated plan
+and minimal reversible experiment are in
+`docs/design/HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md`. Stage 3 remains NOT
+IMPLEMENTED; the next gate is review and correction of the software model,
+not a hardware run.
+
 2026-11-20: `I915AssistedMemoryBackend` now connects the integrated memory
 manager to public i915 GEM/context/execbuffer/wait ioctls. The explicit
 `make gpu-memory-manager-test` completed three allocation/bind/submission/
