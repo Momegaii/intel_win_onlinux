@@ -1,5 +1,16 @@
 # Change log
 
+## 2026-11-20 — Stage 3B design closure and physical readiness audit
+- Added `docs/design/HASWELL_GEN75_STAGE3B_PHYSICAL_READINESS_MATRIX.md` separating implemented/unit-tested, simulated, QEMU, i915-assisted, and independent-physical evidence, with a NO-GO decision and explicit entry criteria.
+- Fixed activation save/restore to snapshot the programmed `PP_DIR_BASE`, not `PP_DIR_BASE_READ`; a divergent-readback test proves the choice.
+- Added `RING_MODE_GEN7` snapshot/restore, pre-enabled PPGTT rejection, and enable/disable readback verification.
+- Fixed failed activation rollback to mark the device conservatively active and block destroy instead of reporting it inactive.
+- Made `sync_page_table_for_device` a required PPGTT page-op callback and call it after zeroing, PTE publication, and PTE clearing; a sync failure poisons the model.
+- Made lifecycle rollback fail closed when a completed stage has no teardown callback.
+- Revalidated every directory PDE access against the live GGTT allocation record and rejected PDE writes while hardware PPGTT is active.
+- Added exact simulated callback-order traces and a per-callback activation failure matrix; tightened the DMA adapter to exact 4 KiB page-table pages.
+- `make stage3a-test`, `make stage3a-sanitize-test`, focused model/adapter/lifecycle tests, `make test` software targets, and `make kernel CC=gcc W=1` pass where run. `tests/smoke.sh` still fails because this environment has no Intel render node. No physical GPU operation was performed; i915 remains bound.
+
 ## 2026-11-20 — Stage 3A finalization and Stage 3B plan
 - Added checked PPGTT model teardown (`idw_hsw_ppgtt_model_destroy_checked`) that refuses while active or invalidation-pending unless the caller asserts hardware quiescence after reset; the void wrapper passes false and no longer frees tables that hardware may reference.
 - Made GGTT directory release refuse and poison while the hardware abstraction reports active PPGTT.

@@ -70,10 +70,17 @@ struct idw_hsw_hw_config {
 
 /*
  * Low-level hardware operations. The real backend owns PCI BAR mapping,
- * forcewake, register serialization, and engine-specific register offsets.
- * `invalidate_tlb` must perform the Gen7.5 INSTPM TLB-invalidate/sync-flush
- * sequence and poll until the sync-flush bit clears. `set_engine_ppgtt` must
- * program only the named engine's RING_MODE_GEN7 PPGTT-enable bit.
+ * forcewake, power wells, register serialization, and engine-specific register
+ * offsets.
+ *
+ * gtt_flush must set GFX_FLSH_CNTL_GEN6 bit 0, issue the required memory
+ * barrier, and wait for the flush to complete before returning. invalidate_tlb
+ * must, for each selected engine, set INSTPM TLB_INVALIDATE and SYNC_FLUSH,
+ * poll until SYNC_FLUSH clears with a bounded timeout, and issue the required
+ * barriers. set_engine_ppgtt must read-modify-write only RING_MODE_GEN7 bit 9
+ * and leave every other bit unchanged. posting_read must perform an uncached
+ * read that completes posted writes. read32/write32 must serialize against
+ * other register users and must not be called from an invalid context.
  */
 struct idw_hsw_hw_ops {
     uint32_t size;
@@ -111,7 +118,11 @@ int idw_hsw_hw_check(const struct idw_hsw_hw *hw);
 int idw_hsw_hw_is_active(const struct idw_hsw_hw *hw);
 int idw_hsw_hw_is_poisoned(const struct idw_hsw_hw *hw);
 
-/* Simulated backend: software state only, never a hardware operation. */
+/*
+ * Simulated backend: software state only, never a hardware operation. The
+ * trace records attempted callbacks in order, including the callback that
+ * failed, so tests can verify exact sequencing and failure points.
+ */
 struct idw_hsw_hw_sim_stats {
     uint32_t reads;
     uint32_t writes;
@@ -121,6 +132,27 @@ struct idw_hsw_hw_sim_stats {
     uint32_t invalidations;
     uint32_t engine_changes;
     uint32_t posting_reads;
+};
+
+#define IDW_HSW_HW_SIM_TRACE_MAX 1024u
+
+enum idw_hsw_hw_sim_event_type {
+    IDW_HSW_HW_SIM_EVENT_READ = 1u,
+    IDW_HSW_HW_SIM_EVENT_WRITE = 2u,
+    IDW_HSW_HW_SIM_EVENT_GTT_READ = 3u,
+    IDW_HSW_HW_SIM_EVENT_GTT_WRITE = 4u,
+    IDW_HSW_HW_SIM_EVENT_GTT_FLUSH = 5u,
+    IDW_HSW_HW_SIM_EVENT_INVALIDATE = 6u,
+    IDW_HSW_HW_SIM_EVENT_ENGINE = 7u,
+    IDW_HSW_HW_SIM_EVENT_POSTING_READ = 8u
+};
+
+struct idw_hsw_hw_sim_event {
+    uint32_t type;
+    uint32_t engine;
+    uint64_t offset;
+    uint32_t value;
+    uint32_t reserved;
 };
 
 enum idw_hsw_hw_sim_fail {
@@ -148,5 +180,11 @@ int idw_hsw_hw_sim_read_gtt(const struct idw_hsw_hw *hw, uint64_t offset,
                             uint32_t *value);
 int idw_hsw_hw_sim_reset(struct idw_hsw_hw *hw);
 uint32_t idw_hsw_hw_sim_engine_mask(const struct idw_hsw_hw *hw);
+int idw_hsw_hw_sim_fail_engine(struct idw_hsw_hw *hw, uint32_t engine);
+int idw_hsw_hw_sim_trace_reset(struct idw_hsw_hw *hw);
+uint32_t idw_hsw_hw_sim_trace_count(const struct idw_hsw_hw *hw);
+int idw_hsw_hw_sim_trace_get(const struct idw_hsw_hw *hw, uint32_t index,
+                             struct idw_hsw_hw_sim_event *event);
+int idw_hsw_hw_sim_trace_overflowed(const struct idw_hsw_hw *hw);
 
 #endif

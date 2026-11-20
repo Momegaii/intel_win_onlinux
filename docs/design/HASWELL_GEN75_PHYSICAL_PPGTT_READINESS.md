@@ -140,7 +140,7 @@ the disposition. None of these fixes touched hardware.
 | Page directory was a CPU array | The model kept `uint32_t directory[512]` in CPU memory. | PRM: the directory must reside in the GGTT, and PDEs can only be modified through GTTADDR. | **Corrected in the model.** A directory provider contract supplies a GGTT-backed 4 KiB directory; the model keeps a separate CPU shadow and performs PDE writes/reads through GTTADDR callbacks. |
 | PDE removal was treated as ordinary unmap | `idw_hsw_ppgtt_unmap()` cleared the PDE, retired the table, and freed it after invalidation acknowledgement. | PRM: a running context caches directory entries and has no on-the-fly PDE invalidation. i915 keeps the PDE valid and clears PTEs to a scratch entry. | **Corrected.** Unmap keeps the PDE valid. `idw_hsw_ppgtt_reclaim_empty()` requires quiescence and no pending invalidation, points the PDE at a zeroed scratch table, and defers freeing the old table until the next invalidation completes. |
 | Invalidation was only a software generation | The model tracked a dirty range and generation. | PRM/i915 require TLB invalidate plus sync flush; PDE updates require context-inactive rules. | **Partially corrected in the model.** The model now tracks active/quiesced state and rejects PDE publication or reclamation while active. Register-level invalidation remains absent and i915-owned. |
-| No PPGTT activation path | The model has no `PP_DCLV`, `PP_DIR_BASE`, `RING_MODE_GEN7`, or `INSTPM` operations. | i915 programs `PP_DCLV` then `PP_DIR_BASE`, enables PPGTT per engine, and invalidates TLBs before submitting work. | **Unchanged; physical blocker.** VM activation and engine/context ownership are missing. |
+| No PPGTT activation path | The model has no `PP_DCLV`, `PP_DIR_BASE`, `RING_MODE_GEN7`, or `INSTPM` operations. | i915 programs `PP_DCLV` then `PP_DIR_BASE`, enables PPGTT per engine, and invalidates TLBs before submitting work. | **Partially corrected.** Stage 3A now has a per-engine activation/deactivation abstraction, exact simulated ordering, `RING_MODE_GEN7` save/restore, and pre-enabled rejection. Real MMIO, engine/context ownership, cache policy, and load-completion ordering remain physical blockers. |
 | Cacheability policy is only PTE UC | PTE valid plus uncached (`0`) is modeled. | PRM provides 4-bit cacheability controls; i915 also sets global `ECOCHK` PPGTT override and `GAC_ECO_BITS` for Haswell. | **Unchanged; physical blocker.** The PTE UC choice is valid, but global walk/cache policy is not modeled or verified. |
 | Alignment is only 4 KiB for PT and pages | Adapter/model require 4 KiB alignment. | PRM: translation table bases are 4 KiB aligned; i915 pins the Gen6 PD VMA with `GEN6_PD_ALIGN = 64 KiB`. | **Modeled.** Directory provider requires at least 4 KiB GGTT alignment and exposes i915's 64 KiB recommendation as a constant. The hardware requirement remains open. |
 | 32 KiB pages are unsupported | PDE bit 1 is always zero. | PRM: PDE bit 1 selects 4 KiB or 32 KiB pages. | **Rejected explicitly.** `idw_hsw_ppgtt_validate_pde_entry()` returns `-EOPNOTSUPP` for the 32 KiB bit instead of silently accepting it. |
@@ -309,12 +309,14 @@ PDE changes:
 - Update only when the context is not active.
 - A running context caches directory entries; the PRM says it is unknown when
   an update will take effect.
-- `PP_DCLV` controls which 16-entry groups are loaded on context restore.
-  i915 writes `0xffffffff` for the 2 GiB profile.
-- `PP_DIR_BASE` is a global context register, not maintained per context in
+- `PP_DCLV` is ring-relative and per engine. It controls which 16-entry groups
+  are loaded on context restore. i915 writes `0xffffffff` for the 2 GiB
+  profile.
+- `PP_DIR_BASE` is ring-relative and per engine, not maintained per context in
   ring-buffer mode. i915 loads `PP_DCLV` then `PP_DIR_BASE` through
-  `MI_LOAD_REGISTER_IMM` before submitting a context, after ensuring the pipe is
-  flushed and TLBs are invalidated.
+  `MI_LOAD_REGISTER_IMM`, stores `PP_DIR_BASE` to scratch GTT to stall until the
+  load completes, then sets `INSTPM` TLB invalidate before submitting work.
+  An MMIO-only equivalent of the stall is unresolved.
 - Do not free a page table while a cached PDE may still reference it. Use a
   scratch page table, or destroy/recreate the context.
 
@@ -325,10 +327,11 @@ this investigation.
 
 | Register | Offset | Purpose | i915 use | IDW status |
 |---|---:|---|---|---|
-| `PP_DCLV` | `0x2220` (64-bit) | PPGTT directory cacheline valid; bits 31:0 enable 16-entry groups | Writes `PP_DIR_DCLV_2G` (`0xffffffff`) | Not owned; no write path |
-| `PP_DIR_BASE` | `0x2228` | Page-directory base offset in GGTT | Writes per-engine `pp_dir` byte offset | Not owned; no hardware GGTT allocator |
-| `GFX_MODE` / `RING_MODE_GEN7` | `0x229c` (render; per-engine base + `0x29c`) | Per-process GTT enable, bit 9 | Sets `GFX_PPGTT_ENABLE` for Gen7+ | Not owned |
-| `INSTPM` | `0x20c0` (render; per-engine base + `0xc0`) | TLB invalidate bit 9, sync flush bit 5 | Uses both for engine TLB invalidation | Not owned |
+| `PP_DCLV` | per-engine base + `0x220` (render `0x2220`, video `0x12220`, blitter `0x22220`) | PPGTT directory cacheline valid; bits 31:0 enable 16-entry groups | Writes `PP_DIR_DCLV_2G` (`0xffffffff`) per engine | Not owned; no real write path |
+| `PP_DIR_BASE` | per-engine base + `0x228` (render `0x2228`) | Page-directory base offset in GGTT | Writes per-engine `pp_dir` byte offset | Not owned; no hardware GGTT allocator |
+| `PP_DIR_BASE_READ` | per-engine base + `0x518` (render `0x2518`) | Loaded directory base readback | Diagnostic readback | Not owned |
+| `GFX_MODE` / `RING_MODE_GEN7` | per-engine base + `0x29c` (render `0x229c`) | Per-process GTT enable, bit 9 | Sets `GFX_PPGTT_ENABLE` for Gen7+ | Not owned |
+| `INSTPM` | per-engine base + `0xc0` (render `0x20c0`) | TLB invalidate bit 9, sync flush bit 5 | Uses both for engine TLB invalidation | Not owned |
 | `GFX_FLSH_CNTL_GEN6` | `0x101008` | GGTT flush, bit 0 | Used by `gen6_ggtt_invalidate()` | Not owned |
 | `ECOCHK` | `0x4090` | PPGTT cacheability override, bits 4:3 | Selects WB for Haswell | Not owned |
 | `GAC_ECO_BITS` | `0x14090` | PPGTT cache behavior, bits 9:8 | Selects 64-byte cache behavior | Not owned |
@@ -550,8 +553,13 @@ Would not prove:
 | CPU shadow is separate from hardware directory | Yes (PRM) | Yes; shadow accessor and hardware readback tested | Not modeled | Not run |
 | Page tables in non-snooped main memory | Yes (PRM) | Coherent/streaming adapter checks | Coherent EDU pages | Not run |
 | Live PDE removal is unsafe | Yes (PRM + i915) | Yes; unmap keeps PDE, active reclaim rejected, deferred free | Not modeled | Not run |
-| PTE TLB invalidation via INSTPM + sync flush | Yes (PRM + i915) | Software generation only; no register access | Not modeled | Not run |
-| GGTT flush via GFX_FLSH_CNTL_GEN6 | i915 | No | Not modeled | Not run |
+| PTE TLB invalidation via INSTPM + sync flush | Yes (PRM + i915) | Per-engine abstraction and exact simulated order; real poll delegated to backend | Not modeled | Not run |
+| Per-engine activation ordering | i915 | Exact simulated trace for render/video/blitter selection | Not modeled | Not run |
+| `RING_MODE_GEN7` save/restore and pre-enabled rejection | i915 | Yes; divergent-state tests | Not modeled | Not run |
+| Failed rollback never reports inactive | Design requirement | Yes; failed activation rollback keeps active and blocks destroy | Not modeled | Not run |
+| Page-table writes synchronized for a non-snooped GPU | PRM | Yes; required sync callback after zero, PTE publish, and PTE clear | Coherent EDU pages | Not run |
+| `PP_DIR_BASE` load completion | i915 command stream | No; MMIO-only equivalent unresolved | Not modeled | Not run |
+| GGTT flush via GFX_FLSH_CNTL_GEN6 | i915 | Backend contract only | Not modeled | Not run |
 | ECOCHK/GAC_ECO_BITS PPGTT policy | PRM/i915 | No | Not modeled | Not run |
 | Page-walk translation of a data page | PRM | Software translation only | No | Not run |
 | Instruction fetch through PPGTT | PRM | No | No | Not run |

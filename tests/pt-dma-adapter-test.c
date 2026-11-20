@@ -324,6 +324,9 @@ static int test_adapter_validation(void)
     bad.bytes = 0;
     CHECK(idw_pt_dma_adapter_validate_page(&adapter, &bad) == -EINVAL);
     bad = page;
+    bad.bytes = 2 * IDW_PT_PAGE_BYTES;
+    CHECK(idw_pt_dma_adapter_validate_page(&adapter, &bad) == -EINVAL);
+    bad = page;
     bad.allocation_cookie = 0;
     CHECK(idw_pt_dma_adapter_validate_page(&adapter, &bad) == -EINVAL);
     bad = page;
@@ -456,8 +459,10 @@ static int test_ppgtt_integration(void)
     CHECK(page_ops.version == 1);
     CHECK(page_ops.scope.device_cookie == FAKE_SCOPE_COOKIE);
     CHECK(idw_hsw_ppgtt_model_create(&page_ops, &directory_ops, &model) == 0);
+    CHECK(page_ops.sync_page_table_for_device != NULL);
     CHECK(idw_hsw_ppgtt_map(model, va, 2 * IDW_HASWELL_PPGTT_PAGE_SIZE,
                             mappings, 2) == 0);
+    CHECK(fake.sync_calls > 0);
     CHECK(fake.allocated == 2 && fake_live(&fake) == 2);
     CHECK(adapter.outstanding == 2);
     CHECK(idw_hsw_ppgtt_pde(model, 0) == 0x20000001u);

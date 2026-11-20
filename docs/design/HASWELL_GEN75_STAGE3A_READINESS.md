@@ -111,16 +111,20 @@ High-level operations:
   callback, and performs a posting read at each selected engine's `INSTPM`
   register.
 - `idw_hsw_hw_activate()` flushes the GGTT, snapshots each selected engine's
-  `PP_DCLV` and `PP_DIR_BASE_READ`, writes `PP_DCLV = 0xffffffff` and the
-  directory GGTT offset to each selected engine's `PP_DIR_BASE`, enables PPGTT
-  on each requested engine, and invalidates the engine TLBs. It does not write
-  only the render-engine aliases at `0x2220`/`0x2228`.
-- `idw_hsw_hw_deactivate()` disables the active engines, invalidates, restores
-  each engine's saved `PP_DCLV`/`PP_DIR_BASE`, flushes, and posts. Every step is
-  attempted even after an earlier failure; any failure poisons the abstraction
-  and keeps the active state conservative.
+  `PP_DCLV`, programmed `PP_DIR_BASE`, and `RING_MODE_GEN7`, writes
+  `PP_DCLV = 0xffffffff` and the directory GGTT offset to each selected
+  engine's `PP_DIR_BASE`, enables PPGTT on each requested engine, verifies the
+  enable bit by readback, and invalidates the engine TLBs. It does not write
+  only the render-engine aliases at `0x2220`/`0x2228`. Activation is rejected
+  with `-EBUSY` if any selected engine already has PPGTT enabled.
+- `idw_hsw_hw_deactivate()` disables the active engines, verifies the disable
+  by readback, invalidates, restores each engine's saved `PP_DCLV`/
+  `PP_DIR_BASE`/`RING_MODE_GEN7`, flushes, and posts. Every step is attempted
+  even after an earlier failure; any failure poisons the abstraction and keeps
+  the active state conservative.
 - Activation failure rolls back enabled engines and restores the saved
-  per-engine registers. A rollback failure poisons the abstraction. An
+  per-engine registers. A rollback failure poisons the abstraction and marks
+  the device conservatively active, so `destroy()` refuses until a reset. An
   invalidation failure during activation always poisons because TLB state is
   uncertain. A failed GTT read, GTT write, or GTT flush also poisons because
   hardware visibility is uncertain.
@@ -150,10 +154,16 @@ The provider implements `struct idw_hsw_ppgtt_directory_ops`:
   unpins, and frees the GGTT range. Teardown continues to the free step even if
   zeroing/flushing fails, and marks the provider poisoned.
 - `write_pde_gttaddr` / `read_pde_gttaddr`: validate the directory scope and
-  use the hardware abstraction.
+  use the hardware abstraction. The PPGTT model reads each PDE back after the
+  write and rejects a mismatch.
 - `flush_gtt`: flushes through the hardware abstraction.
 - Initialization rejects a provider scope that does not match the hardware
   abstraction's device/generation scope with `-EXDEV`.
+
+The PPGTT page-op contract now requires `sync_page_table_for_device`. The model
+calls it after zeroing a new table, after publishing PTEs, and after clearing
+PTEs, so a non-snooped GPU can see the table contents. A sync failure poisons
+the model. The DMA adapter supplies this callback.
 
 This connects the corrected CPU PPGTT model to a GGTT-visible directory rather
 than a CPU array. It still does not make the physical GPU consume that
@@ -220,9 +230,25 @@ Coverage:
   stale frees, pin/resident/bind, teardown refusal, and exhaustion.
 - Haswell register golden offsets/masks for all three engine bases, GTTADDR
   PDE read/write, directory residency and pinning, per-engine
-  activation/deactivation with save/restore, engine masks, per-engine INSTPM
-  barriers, failed-engine rollback without poison, GTT-write and invalidation
-  failure poison, and invalid ranges.
+  activation/deactivation with save/restore of `PP_DCLV`, `PP_DIR_BASE`, and
+  `RING_MODE_GEN7`, engine masks, per-engine INSTPM barriers, failed-engine
+  rollback without poison, GTT-write and invalidation failure poison, and
+  invalid ranges.
+- Exact activation and deactivation callback ordering through the simulator
+  trace, including per-engine reads, writes, enables, verification reads,
+  invalidations, and posting reads.
+- Activation of all three engines together, and a partial activation where the
+  blitter enable fails after the render enable succeeds, with rollback
+  restoring both engines.
+- A failure matrix over read, write, GTT, flush, invalidate, engine, and posting
+  read failures, asserting that a device left active can never be destroyed as
+  if inactive.
+- Rejection of activation when PPGTT is already enabled; divergent
+  `PP_DIR_BASE`/`PP_DIR_BASE_READ` values prove the programmed base is saved.
+- Rejection of stale directory objects after free and of PDE writes while
+  hardware PPGTT is active.
+- Page-table sync failure poisons the model; sync is called after zeroing,
+  PTE publication, and PTE clearing.
 - PPGTT model integration through the GGTT directory provider, including a
   mapped PDE visible in simulated GTT, translation, activation, reclaim,
   device-scope mismatch rejection, and teardown.
@@ -263,7 +289,8 @@ Before a real backend may program hardware:
 3. Implement a real MMIO/GTTADDR backend for the per-engine offsets defined by
    the abstraction.
 4. Resolve Haswell cache policy (`ECOCHK`, `GAC_ECO_BITS`), `PP_DCLV`
-   semantics, coherency/IOMMU behavior, and the `PGTBL_CTL2` open question.
+   semantics, coherency/IOMMU behavior, `PP_DIR_BASE` load-completion ordering,
+   and the `PGTBL_CTL2` open question.
 5. Add locking, sleepability, and callback-context rules for the real backend.
 6. Prove page-table publication, invalidation completion, and per-engine
    activation on a disposable system with saved register evidence.

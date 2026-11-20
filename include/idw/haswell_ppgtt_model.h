@@ -23,6 +23,15 @@ struct idw_hsw_ppgtt_page_ops {
     struct idw_device_scope scope;
     int (*alloc_page_table_page)(void *context, struct idw_dma_page *page);
     void (*free_page_table_page)(void *context, struct idw_dma_page *page);
+    /*
+     * Make page-table writes visible to the non-snooped GPU. The model calls
+     * this after zeroing a new table, after publishing PTEs, and after clearing
+     * PTEs. The callback must return an error if the transfer cannot be
+     * completed.
+     */
+    int (*sync_page_table_for_device)(void *context,
+                                      const struct idw_dma_page *page,
+                                      uint32_t offset, uint32_t bytes);
     void *context;
 };
 

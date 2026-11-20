@@ -14,8 +14,11 @@ static int rollback(struct idw_device_lifecycle *lifecycle)
         --i;
         if (!(lifecycle->completed_mask & (1u << i)))
             continue;
-        if (!lifecycle->stages[i].fini)
+        if (!lifecycle->stages[i].fini) {
+            if (!first_error)
+                first_error = -EIO;
             continue;
+        }
         ret = lifecycle->stages[i].fini(lifecycle->context);
         if (ret) {
             if (ret > 0)
