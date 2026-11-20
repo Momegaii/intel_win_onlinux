@@ -1,0 +1,14 @@
+CXX ?= g++
+CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra
+
+.PHONY: all clean
+all: idw_client idw_win_shim
+
+idw_client: idw_client.cpp idw_uapi.h
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+idw_win_shim: idw_win_shim.cpp idw_uapi.h
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+clean:
+	rm -f idw_client idw_win_shim

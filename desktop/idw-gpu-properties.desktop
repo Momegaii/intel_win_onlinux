@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=IDW — Intel GPU Properties
+Comment=Inspect Intel DRM adapter properties and test GEM memory
+Exec=idw-gpu-properties
+Icon=video-display
+Terminal=false
+Categories=System;HardwareSettings;
+StartupNotify=true

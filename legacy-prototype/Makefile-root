@@ -1,0 +1,10 @@
+.PHONY: all clean
+all:
+	$(MAKE) -f Makefile-kernel all
+	$(MAKE) -f Makefile-user all
+	$(MAKE) -f Makefile-installer all
+
+clean:
+	$(MAKE) -f Makefile-kernel clean
+	$(MAKE) -f Makefile-user clean
+	$(MAKE) -f Makefile-installer clean

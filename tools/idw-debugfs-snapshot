@@ -1,0 +1,44 @@
+#!/usr/bin/python3
+"""Read-only, fixed-path i915 debugfs snapshot for IDW. Intended for pkexec."""
+import json
+import re
+from pathlib import Path
+
+BASE = Path('/sys/kernel/debug/dri/0000:00:02.0')
+
+def read(name):
+    try:
+        return (BASE / name).read_text(errors='replace')
+    except OSError:
+        return ''
+
+def first(pattern, text, default='Not exposed'):
+    m = re.search(pattern, text, re.I | re.M)
+    return m.group(1).strip() if m else default
+
+freq = read('i915_frequency_info')
+boost = read('i915_rps_boost_info')
+gpu = read('i915_gpu_info')
+eng = read('i915_engine_info')
+gem = read('i915_gem_objects')
+
+metrics = {
+    'Current frequency': first(r'^Current freq:\s*(\d+\s*MHz)', freq),
+    'Requested frequency': first(r'^RPNSWREQ:\s*(\d+\s*MHz)', freq),
+    'Minimum frequency': first(r'^Min freq:\s*(\d+\s*MHz)', freq),
+    'Nominal frequency': first(r'^Nominal \(RP1\) frequency:\s*(\d+\s*MHz)', freq),
+    'Maximum frequency': first(r'^Max freq:\s*(\d+\s*MHz)', freq),
+    'Boost frequency': first(r'^Boost freq:\s*(\d+\s*MHz)', freq),
+    'GPU execution units': first(r'^EU total:\s*(\d+)', gpu),
+    'Slices / subslices': (first(r'^slice total:\s*(\d+)', gpu) + ' / ' + first(r'^subslice total:\s*(\d+)', gpu)),
+    'GPU reset count': first(r'^Reset count:\s*(\d+)', gpu),
+    'GEM objects': first(r'^(\d+) shrinkable', gem),
+    'GEM object bytes': first(r'^(?:\d+) shrinkable \[\d+ free\] objects,\s*(\d+) bytes', gem),
+    'Render engine': 'Present' if re.search(r'^rcs0\s*$', eng, re.M) else 'Not reported',
+    'Blitter engine': 'Present' if re.search(r'^bcs0\s*$', eng, re.M) else 'Not reported',
+    'Video engine': 'Present' if re.search(r'^vcs0\s*$', eng, re.M) else 'Not reported',
+    'Video Enhancement engine': 'Present' if re.search(r'^vecs0\s*$', eng, re.M) else 'Not reported',
+    'RPS enabled': first(r'^RPS enabled\?\s*(yes|no)', boost),
+    'GPU busy': first(r'^GPU busy\?\s*(yes|no)', boost),
+}
+print(json.dumps({'metrics': metrics, 'source': str(BASE)}))

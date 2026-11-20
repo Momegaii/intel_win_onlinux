@@ -1,0 +1,11 @@
+MINGW_CC ?= x86_64-w64-mingw32-gcc
+CFLAGS ?= -O2 -Wall -Wextra
+
+.PHONY: all clean
+all: inteldriverinstaller.exe
+
+inteldriverinstaller.exe: inteldriverinstaller.c idw_uapi.h
+	$(MINGW_CC) $(CFLAGS) $< -o $@
+
+clean:
+	rm -f inteldriverinstaller.exe
