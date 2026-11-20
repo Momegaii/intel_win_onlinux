@@ -14,7 +14,9 @@ struct MemoryBackendOps {
     /*
      * Callbacks return zero or negative errno. Failed create/bind/submit
      * operations must not leave an unreported backing, mapping, or submission.
-     * bind must report its actual VA; invalidate succeeds only after stale
+     * bind returns -EUCLEAN with actual_va set when a partial mapping needs
+     * recover_binding(); other bind failures must be fully rolled back.
+     * invalidate succeeds only after stale
      * translations can no longer be used. Successful submit returns a
      * nonzero fence. wait returns zero only on completion; quiesce returns
      * zero only when the fence can no longer reference resources. Fence zero
@@ -61,7 +63,10 @@ public:
     int unbind(idw_handle handle);
     /* Retries the unbind/invalidation phase left incomplete by a failure. */
     int recover_binding(idw_handle handle);
-    /* A zero-fence -EPROTO still sets ticket; it must be recovered. */
+    /*
+     * -EUCLEAN means submission may be active: ticket is set and reference
+     * retained. A successful submit returning fence zero also sets ticket.
+     */
     int submit(idw_handle handle, uint64_t& ticket);
     /* A failed wait retains the reference until wait succeeds or quiesce does. */
     int wait(uint64_t ticket, int64_t timeout_ns);

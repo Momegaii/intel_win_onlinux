@@ -3,6 +3,14 @@ Version: 0.5.0-resource-lifecycle
 Target: Intel HD Graphics 4600 / Haswell GT2 / PCI 8086:0412
 Host driver ownership: i915
 
+2026-11-20: `I915AssistedMemoryBackend` now connects the integrated memory
+manager to public i915 GEM/context/execbuffer/wait ioctls. The explicit
+`make gpu-memory-manager-test` completed three allocation/bind/submission/
+completion/unbind/destroy lifecycles at GPU VAs `0x10000000`, `0x10001000`,
+and `0x10002000`. i915 owns the actual mappings, PPGTT, translation, and
+execution. Failure recovery was callback-simulated; native DMA and IDW-owned
+PPGTT remain unimplemented.
+
 2026-11-20 integrated memory lifecycle core:
 `include/idw/memory_manager.hpp` / `src/memory_manager.cpp` now combine
 backing-resource callbacks, CPU GPU-VA reservation, backend binding/unbinding,

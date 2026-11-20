@@ -115,8 +115,9 @@ It tracks backing objects, address reservations, backend bindings, invalidation
 recovery, and submission references. A timed-out or failed wait does not drop
 the reference; the backend must positively confirm quiescence before recovery
 releases it. The test backend is simulated and does not integrate with i915 or
-native DMA. The i915 hardware validation path remains separate, and the manager
-must not be described as IDW-owned hardware memory management.
+native DMA. A separate public-ioctl i915-assisted adapter is now connected and
+hardware-tested; i915 continues to own the mappings and execution. Neither path
+is IDW-owned hardware memory management or native DMA.
 
 Page allocations and page-sized mapped addresses are tagged with an opaque
 device scope and lifetime cookie. The CPU model rejects cross-scope table pages

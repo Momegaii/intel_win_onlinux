@@ -2,6 +2,7 @@
 
 ## 2026-11-20
 
+- Connected `MemoryManager` to a separate public-ioctl i915-assisted backend for GEM backing, context-VM pin/bind, resource-inclusive no-op submission, GEM_WAIT/quiescence, context-destroy unbind, and GEM cleanup. Added simulated ioctl integration tests plus opt-in `gpu-memory-manager-test`. Hardware run passed three complete resource lifecycles at `0x10000000`, `0x10001000`, and `0x10002000` on Haswell/i915. i915 remains the owner of the actual mappings and execution; injected timeout, context-destroy, GEM-close, and invalidation failures remain software test evidence only.
 - Added the first integrated CPU-side memory lifecycle manager over a replaceable backend contract. It combines backing-resource lifetime, GPU-VA reservation/release, binding, invalidation retries, submission references, timeout/quiescence recovery, and safe destruction guards. `make memory-manager-test` covers successful lifecycle, backend failures, unexpected VA, invalidation recovery, multiple submissions, and cleanup. The callbacks are simulated in tests; no i915 adapter or native DMA/PPGTT integration is claimed.
 - Added C++ linkage guards to the existing C GPU-VA allocator declaration so the new C++ manager can reuse the allocator without duplicating it.
 - Recorded the requested development order: GPU memory management, Haswell Gen7.5 PPGTT, hardware submission, scheduler, UMD, display/KMS, and ownership transition only after the independent backend is ready.

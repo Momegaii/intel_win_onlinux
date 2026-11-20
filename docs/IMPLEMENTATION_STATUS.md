@@ -2,15 +2,17 @@
 
 Status labels: **working** = exercised by the current project; **scaffold** = source/design exists but not a complete subsystem; **research** = requires hardware/ABI research; **not implemented** = no functional implementation.
 
-**Hardware validation state:** On 2026-11-20, both explicit i915-assisted
-execution tests passed on Haswell `8086:0412` (`/dev/dri/renderD128`, driver
-i915). `gpu-test` completed three no-op render submissions; each returned a
-4 KiB-aligned GPU VA and successful `GEM_WAIT`. `gpu-memory-test` bound at
-`0x10000000` / `0x10100000`, completed the initial and rebound submissions,
-and released the context. No purge was observed during that run. This confirms
-the i915-assisted execution path only; no independent IDW GPU control is
-claimed. Passing software checks is evidence about software behavior, not
-independent GPU control.
+**Hardware validation state:** On 2026-11-20, the explicit i915-assisted
+submission, memory-advice, and integrated manager tests passed on Haswell
+`8086:0412` (`/dev/dri/renderD128`, driver i915). `gpu-test` completed three
+no-op render submissions with successful `GEM_WAIT`; `gpu-memory-test` bound
+at `0x10000000` / `0x10100000`, completed initial and rebound submissions, and
+observed no purge. `gpu-memory-manager-test` completed three manager-tracked
+allocation/bind/submit/wait/unbind/destroy lifecycles at `0x10000000`,
+`0x10001000`, and `0x10002000`. These results confirm i915-assisted execution
+and lifecycle only; no independent IDW GPU control is claimed. Passing
+software checks is evidence about software behavior, not independent GPU
+control.
 
 The latest source audit added strict CLI numeric parsing and argument-bound
 tests, fixed the NT-inspired Unicode shim's bounded-scan condition, and routed
@@ -34,13 +36,14 @@ cleanup passed. No kernel module was loaded; `/dev/idw`-dependent checks skipped
 because it was unavailable. See `SESSION_LOG.md` for the detailed test
 boundary.
 
-The integrated memory-lifecycle core was added after that audit. It composes
-backing callbacks, GPU-VA reservation, binding, invalidation, submission
-references, and explicit recovery in a backend-neutral CPU-side manager.
-`make memory-manager-test` uses a simulated backend and covers success and
-failure lifecycles. No i915 adapter, native DMA provider, hardware PPGTT, or
-residency manager is connected to this new core; its tests are not hardware
-evidence.
+The integrated memory-lifecycle core is now connected to the public-ioctl
+i915-assisted backend. On 2026-11-20, `make gpu-memory-manager-test` completed
+three full allocation/bind/submit/wait/unbind/destroy lifecycles on Haswell
+`8086:0412` with i915. The manager owns the lifecycle records and references;
+i915 owns GEM backing, context VMs, actual PPGTT mappings, translation and
+execution. Simulated ioctl tests cover timeout/quiescence and cleanup failures;
+the physical run did not inject a timeout or invalidation failure. No native
+DMA provider, hardware IDW PPGTT, or independent GPU ownership is implemented.
 
 | Area | Current status | Reality |
 |---|---|---|
@@ -60,12 +63,13 @@ evidence.
 | GPU command submission (i915 path) | implemented and hardware-tested; i915-assisted only | `idwctl gpu-submit` uses the injectable `GpuSubmissionOps` boundary, validates the Haswell two-dword `MI_BATCH_BUFFER_END` + `MI_NOOP` batch, submits it to the i915 render engine, validates the returned 4 KiB-aligned GPU VA, waits up to 5 seconds with GEM_WAIT, and closes the batch/context on success and failures. Final hardware run: 3/3 completions on Haswell `8086:0412`; returned GPU VA `0x011a66000`. Simulated tests cover malformed input, submission failure, timeout, partial creation, and cleanup errors. This is not IDW-owned scheduling or execution. |
 | GPU VM / hardware PPGTT | delegated to i915; IDW CPU model exists | The hardware test uses an i915 context; real address-space creation and page-table management remain inside i915. IDW's separate CPU-only table model is not a GPU mapping and does not program Haswell hardware. |
 | GPU memory management (first validation step) | i915-assisted resource/backing and fixed-VA submission tests passed; native VidMm/residency manager not implemented | `gem-resource-test` validates real GEM create/close, advice, activity and data round-trip without submission. `gpu-memory-test` was run on Haswell/i915: it bound resource and batch objects at `0x10000000` and `0x10100000`, completed no-op submissions before and after advice, destroyed/recreated the context, and rebound at the same VAs. No purge was observed in this run. `GEM_BUSY` reports in-flight activity, not residency. `retained` reports backing existence at the ioctl; DONTNEED makes backing discardable but does not force purge. i915 owns PPGTT, device DMA and residency/placement. |
-| Integrated allocation/VM lifecycle core | software implementation; simulated-backend tests pass | `MemoryManager` composes backend backing ownership, GPU-VA reserve/release, bind/unbind, invalidation retry, submission reference counting, wait/quiescence recovery, and destroy guards. `make memory-manager-test` tests complete success and failure paths. This manager is not yet adapted to i915 or native DMA and does not provide residency/eviction. |
+| Backend-neutral allocation/VM lifecycle core | software implementation; simulated-backend tests pass | `MemoryManager` composes backend backing ownership, GPU-VA reserve/release, bind/unbind, invalidation retry, submission reference counting, wait/quiescence recovery, and destroy guards. `make memory-manager-test` tests complete success and failure paths. The callback core does not itself implement residency/eviction or hardware mappings. |
+| i915-assisted integrated memory manager | implemented and hardware-tested; i915-owned | `I915AssistedMemoryBackend` connects the manager's backing, pin/bind, submit, wait/quiesce, context-destroy unbind, and GEM-close operations using public i915 ioctls and the existing GEM resource tracker. `make gpu-memory-manager-test` completed three objects at `0x10000000`, `0x10001000`, and `0x10002000`; each object was included in a harmless execbuffer batch, completed through GEM_WAIT, unbound by destroying its per-resource context, and destroyed through the manager. Simulated ioctl tests cover wait timeout followed by quiescence, context-destroy retry, mismatched VA recovery, and handle cleanup. No forced physical failure was induced. i915 owns backing, mapping, PPGTT, translation and execution; native DMA and IDW PPGTT remain unimplemented. |
 | GPU-VA interval allocator | CPU-only software model implemented | `src/gpuva_model.c` supports bounded first-fit allocation, alignment, guards, fixed reservations, overlap rejection, and release. It does not own allocations/backing, residency, map references, or hardware GPU addresses. |
 | Haswell Gen7.5 PPGTT CPU model | software table model implemented; physical/hardware validation not run | `src/haswell_ppgtt_model.c` builds 512 PDE slots with 1024-entry/4 KiB PTE tables, uses the upstream Gen6/7 address transform and valid bits with Haswell uncached policy, supports checked map/unmap and software translation, rolls back on allocation/duplicate table-DMA failures, defers empty-table reclamation until matching invalidation acknowledgement, coalesces dirty ranges by generation, and poisons submission checks after invalidation failure. Synthetic DMA addresses and CPU translation are software tests only. |
 | Page-table memory backend boundary | device-scope contract and validators implemented; no real DMA provider | `page_table_memory.h` tags page/mapping addresses with device-generation scope and lifetime cookies. The i915-assisted profile reports GEM/VM-bind/exec-wait capabilities only and rejects DMA-page-table requests. The native DMA contract requires exclusive device ownership and complete allocation/map/sync/invalidation/activation operations; its validator is structural only. Synthetic contract tests do not allocate DMA memory. |
 | Haswell hardware PPGTT | not implemented | No device DMA mapping, DMA synchronization, hardware page-table publication, GPU TLB invalidation, context activation, MMIO, independent page walk, or physical GPU test. i915 remains the owner. |
-| X: IDW command/fence translation | not implemented | The i915 client test exercises submission and completion, but IDW does not yet translate a DXGKRNL-style submission or expose IDW fences. |
+| X: IDW command/fence translation | not implemented | The i915-assisted manager tracks internal submission tickets through completion, but IDW does not yet translate DXGKRNL-style submissions or expose a hardware-independent fence timeline. |
 | P/Q: DRM/KMS integration | research / existing Linux dependency | Uses i915 DRM UAPI for safe observation and GEM smoke test. |
 | R/S/T: WDDM/UMD/WSL2 study | research | No Windows `.sys` loading or UMD execution. |
 | Y/Z: diagnostics/benchmarks | partial | Basic telemetry only; structured crash/fuzz/benchmark suites remain. |

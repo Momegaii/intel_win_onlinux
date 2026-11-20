@@ -153,6 +153,16 @@ int MemoryManager::bind(idw_handle handle, idw_gpuva requested_va,
     ret = callback_status(ops_.bind(userdata_, resource.backing, reserved,
                                     resource.bytes, &backend_va));
     if (ret) {
+        if (ret == -EUCLEAN) {
+            resource.reserved_va = reserved;
+            resource.backend_va = backend_va;
+            resource.binding_state = BindingState::NeedsUnbind;
+            if (backend_va != reserved) {
+                resource.mismatched_va = true;
+                mapping_mismatch_ = true;
+            }
+            return ret;
+        }
         const int release = idw_gpuva_free(&va_space_, reserved);
         return release ? release : ret;
     }
@@ -265,7 +275,7 @@ int MemoryManager::submit(idw_handle handle, uint64_t& ticket)
     ret = callback_status(ops_.submit(userdata_, resource.backing,
                                       resource.backend_va, resource.bytes,
                                       &fence));
-    if (ret) {
+    if (ret && ret != -EUCLEAN) {
         --resource.references;
         submissions_.pop_back();
         return ret;
@@ -273,6 +283,8 @@ int MemoryManager::submit(idw_handle handle, uint64_t& ticket)
     submissions_.back().fence = fence;
     ticket = new_ticket;
     ++next_ticket_;
+    if (ret == -EUCLEAN)
+        return ret;
     return fence ? 0 : -EPROTO;
 }
 

@@ -414,3 +414,53 @@ Validation completed:
 The i915 GEM smoke test in `make test` is hardware-backed, but the integrated
 memory-manager tests remain simulated. No hardware run exercised the new
 manager; i915 remains the only physical GPU owner.
+
+## i915-assisted integrated memory-manager backend
+
+Added `I915AssistedMemoryBackend` using public DRM/i915 GEM, context,
+execbuffer, and wait ioctls. `create_backing` creates/tracks a GEM object;
+`bind` creates a per-resource context and submits/waits a harmless two-dword
+Haswell batch with the backing object pinned at the manager's reserved GPU VA.
+The i915 context owns that VM binding. `submit` creates a per-submission batch
+and includes both the managed resource object and batch in the context
+execbuffer; `wait` maps the manager ticket to that batch's GEM_WAIT; unbind
+destroys the per-resource context, which releases the i915 VM binding, before
+invalidation is acknowledged to the manager. Only then can VA reuse and backing
+destruction proceed. This is intentionally a replaceable assisted backend,
+not IDW PPGTT or DMA.
+
+Callback failure semantics were extended for operations that may have taken
+effect despite returning an error. A bind callback returning `-EUCLEAN` with
+the actual VA retains the reservation and requires `recover_binding`. A submit
+callback returning `-EUCLEAN` retains its ticket/resource reference until a
+wait or quiesce proves safe. The i915 backend registers submitted batch handles
+as fences immediately after successful execbuffer submission, before fallible
+bookkeeping, so a tracking error cannot drop an in-flight resource reference.
+
+Added `tests/i915-memory-backend-test.cpp` with simulated ioctl behavior.
+Coverage includes multiple tracked GEM objects/contexts, resource-inclusive
+execbuffers, exact Haswell no-op payload validation, held references across a
+failed wait, infinite-wait quiescence recovery, context-destroy failure/retry,
+partial/mismatched GPU-VA recovery, GEM-close failure/retry, and final
+GEM/context/fence cleanup. These are simulated ioctl tests, not physical
+hardware evidence.
+
+Added explicit `gpu-memory-manager-test` / `make gpu-memory-manager-test`.
+Physical result on 2026-11-20: PASS on Haswell `8086:0412` with i915 bound.
+Three managed resources were allocated, assigned VAs `0x10000000`,
+`0x10001000`, and `0x10002000`, pinned through i915 context execbuffers,
+included in further harmless no-op submissions, and each `GEM_WAIT` completed.
+The manager then destroyed the contexts (releasing their i915-managed VM
+bindings) and closed all GEM backing. No resource data was dereferenced by the
+no-op command. The physical test did not inject timeouts, wait errors, or
+invalidation failures; those recovery paths were exercised only by simulated
+callback/ioctl tests. i915 remains the physical GPU owner.
+
+Final validation for this integration passed: `make test`, `make kernel`,
+`make i915-memory-backend-test`, `make memory-manager-test`, both manager
+AddressSanitizer/UndefinedBehaviorSanitizer runs with leak detection, GCC
+`-fanalyzer` on the allocator/manager/i915 adapter, shell syntax checking, and
+`git diff --check`. The explicit `make gpu-memory-manager-test` hardware run
+passed again after the final code changes. `/dev/idw`-dependent tests skipped;
+no kernel module was loaded. The build retains the existing libdrm header
+`-Wpedantic` warnings.

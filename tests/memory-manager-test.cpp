@@ -19,6 +19,8 @@ struct FakeBackend {
     int fail_quiesce = 0;
     bool wrong_va = false;
     bool zero_fence = false;
+    bool partial_bind = false;
+    bool partial_submit = false;
     uint32_t live_backings = 0;
     uint32_t live_bindings = 0;
 };
@@ -52,6 +54,8 @@ int bind_resource(void *data, uint64_t, idw_gpuva requested, uint64_t,
         return fake.fail_bind;
     *actual = fake.wrong_va ? requested + 4096 : requested;
     ++fake.live_bindings;
+    if (fake.partial_bind)
+        return -EUCLEAN;
     return 0;
 }
 
@@ -77,6 +81,8 @@ int submit_resource(void *data, uint64_t, idw_gpuva, uint64_t,
     if (fake.fail_submit)
         return fake.fail_submit;
     *fence = fake.zero_fence ? 0 : fake.next_fence++;
+    if (fake.partial_submit)
+        return -EUCLEAN;
     return 0;
 }
 
@@ -152,6 +158,17 @@ int test_mapping_failures_and_recovery()
     fake.fail_bind = 0;
     CHECK(manager.bind(resource, 0, va) == 0);
 
+    CHECK(manager.unbind(resource) == 0);
+    fake.partial_bind = true;
+    CHECK(manager.bind(resource, 0, va) == -EUCLEAN);
+    CHECK(manager.query(resource, info) == 0);
+    CHECK(info.recovery_required && !info.bound);
+    CHECK(manager.destroy(resource) == -EBUSY);
+    fake.partial_bind = false;
+    CHECK(manager.recover_binding(resource) == 0);
+    CHECK(fake.live_bindings == 0);
+    CHECK(manager.bind(resource, 0, va) == 0);
+
     fake.fail_unbind = -EIO;
     CHECK(manager.unbind(resource) == -EIO);
     CHECK(manager.query(resource, info) == 0);
@@ -213,6 +230,15 @@ int test_submission_failure_timeout_and_cleanup()
     CHECK(info.submission_references == 0);
 
     fake.fail_submit = 0;
+    fake.partial_submit = true;
+    CHECK(manager.submit(resource, ticket) == -EUCLEAN);
+    CHECK(ticket != 0);
+    CHECK(manager.query(resource, info) == 0);
+    CHECK(info.submission_references == 1);
+    CHECK(manager.destroy(resource) == -EBUSY);
+    fake.partial_submit = false;
+    CHECK(manager.recover_submission(ticket) == 0);
+
     fake.zero_fence = true;
     CHECK(manager.submit(resource, ticket) == -EPROTO);
     CHECK(ticket != 0);

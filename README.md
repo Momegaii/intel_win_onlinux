@@ -8,12 +8,15 @@ IDW is a Windows-inspired graphics-kernel architecture project for Linux. The A�
 
 - Discovers Intel DRM render nodes and reports PCI identity / active kernel driver.
 - Performs a real i915 GEM object create, write, read-back, verify and close test.
+- Provides an integrated allocation/VA/bind/submit/completion/unbind/destroy
+  lifecycle through an i915-assisted backend; the explicit Haswell test passes
+  with i915 retaining hardware ownership.
 - Displays live i915 telemetry where the running kernel exports it.
 - Provides a desktop properties GUI and an optional read-only debugfs snapshot helper.
 - Provides an optional `/dev/idw` resource/control plane and IDW-native miniport lifecycle dispatcher. It supports metadata-only handles, opt-in kernel system-memory-backed allocations with shared userspace mappings, and retained dma-buf references. A disposable test miniport exercises AddDevice → StartDevice → CreateAllocation(metadata only) → StopDevice → RemoveDevice. It does not register a PCI driver, map BARs, program the GPU, or compete with i915.
 - Preserves the earlier synthetic prototype under `legacy-prototype/` for historical reference only.
 
-**Important:** System-backed allocations are CPU-visible system memory only; they are not pinned for DMA, mapped into a GPU VM, or GPU-local memory. GEM round-trip is real kernel-managed memory-object activity, not GPU command execution. IDW currently does not load Windows `.sys` files, implement a complete `ntoskrnl` ABI, implement `dxgkrnl`, own GPU submission, or produce IDW hardware fences. See [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md).
+**Important:** System-backed allocations are CPU-visible system memory only; they are not pinned for DMA, mapped into a GPU VM, or GPU-local memory. GEM round-trip is real kernel-managed memory-object activity, not GPU command execution. IDW currently does not load Windows `.sys` files, implement a complete `ntoskrnl` ABI, implement `dxgkrnl`, independently submit GPU work, or own hardware fences. The integrated lifecycle manager tracks submissions through its i915-assisted backend, but i915 remains the hardware submission and completion owner. See [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md).
 
 ## Build on Arch Linux
 
@@ -127,10 +130,29 @@ through callbacks, retains VA reservations until invalidation succeeds, holds
 resource references across submissions, and requires backend quiescence before
 releasing references after an uncertain wait. `make memory-manager-test`
 exercises the full lifecycle, including rollback, timeout, invalidation retry,
-and destruction guards. Its backend is simulated: this core is not yet wired
-to the i915 GEM/context path or to native DMA/PPGTT, so these tests establish
-software lifecycle behavior only. The existing i915 hardware tests remain
-separate and i915-owned.
+and destruction guards with a simulated backend. The separate i915-assisted
+adapter and its hardware test are described below; neither backend makes this
+an IDW-owned PPGTT or DMA implementation.
+
+`make i915-memory-backend-test` runs simulated public-ioctl callbacks against
+the same integrated manager/backend path. The opt-in
+`make gpu-memory-manager-test` runs the path on Haswell with i915: the manager
+creates three tracked GEM backings, reserves distinct VAs, pins each object in
+its own i915 context by submitting a harmless batch, then submits another
+harmless batch with that resource included in the execbuffer and waits for
+`GEM_WAIT`. It then destroys each context (releasing its i915-managed VM
+bindings) before destroying the allocation and closing its GEM handle. The
+batch does not dereference resource contents. The observed hardware run
+completed all three submissions at `0x10000000`, `0x10001000`, and
+`0x10002000`. This is real i915-assisted lifecycle integration, not
+IDW-controlled PPGTT or DMA.
+
+Failure injection is software-only: callback tests cover failed waits followed
+by quiescence, context-destroy retry, invalidation retry in the manager model,
+unexpected VA recovery, and backing cleanup. i915 context destruction is the
+backend's unbind/invalidation boundary; the current public path has no separate
+IDW invalidation ioctl. The physical run did not induce timeout or invalidation
+failure.
 
 The user-space i915 GEM resource backend in
 `src/i915_gem_resource_backend.cpp` creates/closes GEM objects, tracks
