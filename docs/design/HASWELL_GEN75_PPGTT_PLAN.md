@@ -13,6 +13,16 @@ compile- and unit-tested, but has no hardware implementation. No hardware
 page-table publication, GPU invalidation, VM activation, or GPU-side
 translation has been performed.
 
+A 2026-11-20 PRM audit found three correctness gaps that must be closed before
+physical use: PDE and PTE address encoding are not identical on Haswell, mapped
+pages are limited to 39-bit addresses, and the page directory must reside in the
+GGTT. It also found that live PDE removal is not supported by the hardware
+directory cache. See
+[`HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md`](HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md)
+for the evidence-separated audit, register ownership map, and the reviewed
+minimal reversible page-walk experiment. That document is a plan; it does not
+claim hardware validation.
+
 ## Independence-first target
 
 IDW's final GPU memory and page-table path must not depend on i915. i915 may be
@@ -48,16 +58,50 @@ The upstream Linux v6.12 i915 source provides a reference baseline:
   4 KiB pages, a PDE shift of 22, 1024 PTEs per page table, and a 2 GiB
   address-space iteration range (512 PDE slots). The same source defines
   address encoding as `addr | ((addr >> 28) & 0xff0)`, valid bits at bit 0,
-  and `HSW_PTE_UNCACHED` as zero. The software model uses this address transform
-  for 40-bit DMA page addresses and only the uncached PTE policy.
+  and `HSW_PTE_UNCACHED` as zero. The software model currently applies the
+  `0xff0` transform to both PDEs and PTEs and accepts 40-bit DMA page
+  addresses. The PRM audit below shows that this is correct for PDEs but not
+  for PTEs.
 - These source facts are an implementation reference, not a substitute for the
   applicable Intel PRM, Haswell SKU/stepping checks, or hardware validation.
-  The current CPU model uses the source-verified address transform, valid bits,
-  and uncached policy only. Before hardware use, cross-check DMA mask,
-  permissions, cache policy, page-table visibility, invalidation ordering, and
-  engine/context activation against the exact Haswell PRM and i915
-  implementation. Do not copy Gen8+ address-width, entry formats, or
-  invalidation assumptions.
+  Before hardware use, cross-check DMA mask, permissions, cache policy,
+  page-table visibility, invalidation ordering, and engine/context activation
+  against the exact Haswell PRM and i915 implementation. Do not copy Gen8+
+  address-width, entry formats, or invalidation assumptions.
+
+### 2026-11-20 PRM audit corrections
+
+The audit in
+[`HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md`](HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md)
+resolves several points that were previously left to the hardware phase:
+
+- **PDE and PTE encoding are not identical.** The Haswell PRM gives PDE bits
+  11:4 to physical address bits 39:32, but gives PTE bits 10:4 to physical
+  address bits 38:32 and PTE bit 11 to cacheability control bit 3. A shared
+  `0xff0` encoder is valid for PDEs, not for PTEs.
+- **Mapped pages are 39-bit, page tables may be 40-bit.** A PDE can point to a
+  page table below 2^40. A PTE can map a data page only below 2^39 because
+  physical address bit 39 is repurposed as cacheability. The model and adapter
+  must enforce separate limits.
+- **The page directory lives in the GGTT.** The PRM requires the directory
+  table itself to be entirely within the GGTT, and PDEs are modified through
+  GTTADDR. The current `directory[512]` CPU array is not a hardware page
+  directory.
+- **Live PDE removal is not supported.** The hardware caches directory entries;
+  the PRM says updates are for non-active contexts and a running context has no
+  on-the-fly PDE invalidation. i915 clears PTEs to a scratch entry instead of
+  removing a PDE. The model's retire-and-free rule must become scratch-table
+  retention or context teardown.
+- **Alignment minimum versus i915 policy.** The PRM requires 4 KiB translation
+  table base alignment. i915 pins the Gen6 PD VMA with `GEN6_PD_ALIGN = 64 KiB`.
+  The PD path should use the stricter value until the hardware requirement is
+  confirmed.
+- **Activation and invalidation are missing.** A physical path needs `PP_DCLV`,
+  `PP_DIR_BASE`, per-engine PPGTT enable, `INSTPM` TLB invalidate plus sync
+  flush, and GGTT flush. These registers remain i915-owned.
+
+No code was changed for this audit. The corrections are implementation
+prerequisites, not completed work.
 
 ## Delivery stages
 
@@ -68,7 +112,7 @@ complete because its interface or a CPU-only model compiles.
 |---|---|---|---|
 | 1 | GPU resource read/write | GPU writes data into a managed resource; CPU reads back the exact result. | Passed on Haswell `8086:0412` through i915: wrote `0x2468ace0` at offset 16 and verified exact CPU readback. This is not independent execution. |
 | 2 | Native DMA | IDW allocates and maps real DMA memory for its exclusively owned PCI device. | In progress: an ownership-checked `dma_alloc_coherent` page provider compiles and tracks device generation/allocation cookies. The QEMU EDU probe passed page-table page allocation and a device-visible layout copy check under TCG on 2026-11-20. Physical IDW-owned DMA remains unproven, and userspace model tests still use synthetic descriptors. |
-| 3 | Hardware PPGTT | GPU uses IDW-created Haswell Gen7.5 page tables. | Not implemented; the software model can use DMA-backed page-table storage, and the QEMU probe verified a page-table DMA copy, but there is no hardware publication, invalidation, or VM activation, and i915 owns hardware page tables. |
+| 3 | Hardware PPGTT | GPU uses IDW-created Haswell Gen7.5 page tables. | Not implemented. The 2026-11-20 PRM audit is complete and the reversible experiment is designed, but the software model still lacks GGTT-resident PDEs, separate 40-bit PDE/39-bit PTE limits, scratch-PDE retention, and register-level invalidation/activation. i915 owns hardware page tables. |
 | 4 | Independent submission | IDW submits and completes commands without i915 graphics execution. | Not implemented. |
 | 5 | Scheduler | Multiple contexts, queues, timeout and recovery. | Not implemented independently. |
 | 6 | UMD | Real shader compilation and rendering. | Not implemented. |
@@ -203,8 +247,10 @@ synthetic DMA addresses, which must never be treated as a device DMA mapping.
 3. **Concurrency:** map/unmap/destroy versus submit/close, lockdep and KASAN,
    and delayed completion while the backing reference remains pinned.
 4. **Static review:** compare constants and operations against a pinned upstream
-   i915 revision and the matching Haswell PRM. Upstream geometry and uncached
-   address/valid encoding are used by the CPU model; resolve remaining PRM
+   i915 revision and the matching Haswell PRM. The 2026-11-20 audit completed
+   this comparison and found the PDE/PTE encoding split, 39-bit mapped-page
+   limit, GGTT-resident page directory, and live-PDE-cache constraints recorded
+   in `HASWELL_GEN75_PHYSICAL_PPGTT_READINESS.md`. Resolve the remaining open
    questions before enabling hardware bit encodings or access policies.
 5. **Emulation:** use only a platform that actually models the required Intel
    graphics generation and behavior. Generic QEMU display devices do not model
