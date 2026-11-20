@@ -49,6 +49,25 @@ sudo pacman -S --needed qemu-system-x86
 The test does not bind, unbind, or otherwise alter the host's physical GPU.
 Host KVM support is not required, although TCG execution is slower.
 
+The runner detaches QEMU stdin from the terminal. `timeout` places QEMU in a
+separate process group, and the `stdio` serial backend can otherwise stop the
+guest with `SIGTTIN` when the test is launched from a terminal.
+
+## Recorded evidence
+
+On 2026-11-20 the page-table path passed in a Debian 13 container with QEMU
+10.0.13 TCG and a Debian `6.12.117+deb13-amd64` guest:
+
+```text
+IDW_QEMU_DMA: page-table DMA layout verified bytes=4096 first=00000ab1 last=003ffab1
+IDW_QEMU_DMA: PASS: probe, page-table DMA, 32 DMA cycles, cleanup and remove completed
+QEMU exit status: 33
+```
+
+The full serial log is
+`tests/qemu-dma/evidence-2026-11-20-tcg-page-table.log` (SHA-256
+`e549ebbf7664bdfff05d8ea259efd2df1ace950cb67ab259c47c57a4b198d6da`).
+
 ## Evidence boundary
 
 A successful run must show the `IDW_QEMU_DMA: PASS` serial marker and QEMU

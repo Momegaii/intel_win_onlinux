@@ -85,6 +85,8 @@ printf 'Guest kernel: %s (%s)\n' "$KERNEL" "$KERNEL_RELEASE"
         "$QEMU"
 } > "$LOG"
 set +e
+# timeout puts QEMU in a separate process group. Detach stdin so the stdio
+# serial backend cannot stop the guest with SIGTTIN when run from a TTY.
 timeout --signal=TERM --kill-after=5 90 \
     "$QEMU" \
         -machine pc,accel=tcg \
@@ -99,7 +101,7 @@ timeout --signal=TERM --kill-after=5 90 \
         -serial stdio \
         -device edu,dma_mask=0xffffffffff \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-        2>&1 | tee -a "$LOG"
+        < /dev/null 2>&1 | tee -a "$LOG"
 QEMU_STATUS=${PIPESTATUS[0]}
 set -e
 printf 'QEMU exit status: %d\n' "$QEMU_STATUS" | tee -a "$LOG"

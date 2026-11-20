@@ -669,8 +669,45 @@ adapter, PPGTT model, and page-table contract tests; `make kernel CC=gcc` and
 `make kernel CC=gcc W=1` built all three modules. The full `make test` compiled
 all userspace targets after installing Debian `libdrm-dev` and `pkg-config`, but
 its final `tests/smoke.sh` step failed because this container has no Intel DRM
-render node. The QEMU guest test itself was not executed in this continuation,
-so the preserved TCG log remains the virtual-DMA evidence and does not cover
-page-table storage. No hardware page-table publication, GPU invalidation, VM
-activation, resource mapping, MMIO, physical Haswell DMA, or independent GPU
-ownership is claimed.
+render node. The QEMU guest test was not executed in that continuation; the
+follow-up run below covers page-table storage. No hardware page-table
+publication, GPU invalidation, VM activation, resource mapping, MMIO, physical
+Haswell DMA, or independent GPU ownership is claimed.
+
+### QEMU EDU page-table DMA execution
+
+Installed QEMU 10.0.13 and a matching Debian `6.12.117+deb13-amd64` kernel and
+header tree in the test container, then executed the previously unrun
+page-table path:
+
+```sh
+KDIR=/lib/modules/6.12.117+deb13-amd64/build \
+IDW_QEMU_KERNEL=/boot/vmlinuz-6.12.117+deb13-amd64 \
+make qemu-dma-test
+```
+
+The first attempts timed out with no guest serial output because `timeout`
+runs QEMU in a separate process group and the `stdio` serial backend stopped on
+`SIGTTIN` while reading the terminal. `tests/qemu-dma/run.sh` now redirects
+QEMU stdin from `/dev/null`; the test then passed from `make`.
+
+The guest allocated page-table pages through the DMA adapter, copied a
+populated Gen7.5 page table to a second DMA page with EDU, and verified the
+exact bytes and first/last PTE values:
+
+```text
+IDW_QEMU_DMA: page-table DMA layout verified bytes=4096 first=00000ab1 last=003ffab1
+IDW_QEMU_DMA: page-table malformed descriptors and unsupported mapping rejected
+IDW_QEMU_DMA: page-table adapter cleanup verified
+IDW_QEMU_DMA: 32 device DMA read/write cycles verified
+IDW_QEMU_DMA: remove freed outstanding provider pages=yes result=0
+IDW_QEMU_DMA: PASS: probe, page-table DMA, 32 DMA cycles, cleanup and remove completed
+QEMU exit status: 33
+```
+
+The full serial output is preserved at
+`tests/qemu-dma/evidence-2026-11-20-tcg-page-table.log` (SHA-256
+`e549ebbf7664bdfff05d8ea259efd2df1ace950cb67ab259c47c57a4b198d6da`). This
+closes the previously open QEMU page-table evidence gap. It remains QEMU
+virtual-device DMA evidence, not physical Haswell DMA or hardware PPGTT; Stage
+2 remains in progress and Stage 3 remains not started.
