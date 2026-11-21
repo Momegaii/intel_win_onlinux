@@ -9,6 +9,10 @@
 #include <stdbool.h>
 #endif
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define IDW_HSW_PPGTT_PDES 512u
 #define IDW_HSW_PPGTT_DIRECTORY_BYTES IDW_HASWELL_PPGTT_PAGE_SIZE
 #define IDW_HSW_PPGTT_DIRECTORY_ALIGN IDW_HASWELL_PPGTT_PAGE_SIZE
@@ -146,5 +150,9 @@ int idw_hsw_ppgtt_hardware_pde(const struct idw_hsw_ppgtt_model *model,
                                uint32_t pde_index, uint32_t *pde);
 uint64_t idw_hsw_ppgtt_directory_ggtt_offset(
     const struct idw_hsw_ppgtt_model *model);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

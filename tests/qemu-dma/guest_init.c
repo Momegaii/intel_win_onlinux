@@ -10,6 +10,7 @@
 #include <sys/reboot.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static void stop_guest(const char *reason)
@@ -58,6 +59,26 @@ static int load_module(const char *path)
 	return ret;
 }
 
+static int run_native_dma_backend_test(void)
+{
+        pid_t pid;
+        int status;
+
+        pid = fork();
+        if (pid < 0)
+                return -1;
+        if (pid == 0) {
+                execl("/native-dma-backend-test", "native-dma-backend-test",
+                      "--require-device", (char *)NULL);
+                _exit(127);
+        }
+        if (waitpid(pid, &status, 0) != pid)
+                return -1;
+        if (!WIFEXITED(status))
+                return -1;
+        return WEXITSTATUS(status);
+}
+
 static void signal_qemu_exit(unsigned char code)
 {
 	int port;
@@ -100,6 +121,11 @@ int main(void)
 		stop_guest("load idw_core.ko");
 	if (load_module("/modules/idw_edu_dma_test.ko"))
 		stop_guest("load idw_edu_dma_test.ko or bind EDU device");
+
+	puts("IDW_QEMU_DMA: running native DMA backend through MemoryManager");
+	fflush(stdout);
+	if (run_native_dma_backend_test())
+		stop_guest("native DMA backend test");
 
 	if (syscall(SYS_delete_module, "idw_edu_dma_test", 0))
 		stop_guest("unload test driver and run PCI remove");

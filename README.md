@@ -103,7 +103,7 @@ Haswell is Gen 7.5. Do not assume Gen8+ address-space or command-stream features
 | Stage | Milestone | Proof required | Status |
 |---|---|---|---|
 | 1 | GPU resource read/write | GPU writes data into a managed resource; CPU reads back the exact result. | Complete for the i915-assisted path: Haswell `8086:0412` wrote `0x2468ace0` at resource offset 16 and CPU read it back exactly. |
-| 2 | Native DMA | IDW allocates and maps real DMA memory for its exclusively owned PCI device. | In progress: QEMU EDU virtual-device DMA, page-table DMA copy, and provider cleanup passed on TCG. Physical Haswell DMA remains unproven; i915 remains bound. See `tests/qemu-dma/evidence-2026-11-20-tcg-page-table-corrected.log`. |
+| 2 | Native DMA | IDW allocates and maps real DMA memory for its exclusively owned PCI device. | In progress: QEMU EDU virtual-device DMA, page-table DMA copy, resource-backing DMA through `MemoryManager`, and provider cleanup passed on TCG. Physical Haswell DMA remains unproven; i915 remains bound. See `tests/qemu-dma/evidence-2026-11-20-native-dma-backend.log`. |
 | 3 | Hardware PPGTT | GPU uses IDW-created Haswell Gen7.5 page tables. | **Stage 3A software infrastructure and Stage 3B closure audit implemented; physical path not implemented.** The CPU model has separate 40-bit PDE/39-bit PTE encoders, GGTT-resident directory modeling with GTTADDR writes, required page-table DMA synchronization, active/quiesced publication rules, and scratch-PDE retention. A checked GGTT allocator, Haswell GTTADDR/flush/invalidate/activation abstraction with exact simulated ordering and `RING_MODE_GEN7` save/restore, a GGTT directory provider, and an independent-device ownership/teardown/recovery lifecycle are tested. Real PCI ownership, MMIO, platform GGTT aperture ownership, cache policy, `PP_DIR_BASE` load-completion ordering, reset, and a physical page walk remain missing. i915 owns hardware mappings. The readiness matrix records **NO-GO** for independent hardware initialization. See `docs/design/HASWELL_GEN75_STAGE3A_READINESS.md` and `docs/design/HASWELL_GEN75_STAGE3B_PHYSICAL_READINESS_MATRIX.md`. |
 | 4 | Independent submission | IDW submits and completes commands without i915 graphics execution. | Not implemented; all demonstrated execution is i915-assisted. |
 | 5 | Scheduler | Multiple contexts, queues, timeout and recovery. | Not implemented independently; existing context/fence tests do not establish an IDW scheduler. |
@@ -172,9 +172,12 @@ The opt-in `make qemu-dma-test` runs a separate QEMU TCG guest using QEMU EDU
 (`1234:11e8`) to exercise the kernel DMA provider with actual virtual
 device-side DMA transactions. The probe also copies a fully populated 4 KiB
 Gen7.5 page table to a second DMA page and verifies the exact layout after
-device DMA. That page-table path passed on 2026-11-20 under QEMU 10.0.13 TCG
-with a Debian 6.12.117 guest; the serial log is
-`tests/qemu-dma/evidence-2026-11-20-tcg-page-table-corrected.log`. It is not part of
+device DMA. The guest then runs `NativeDmaMemoryBackend` through
+`MemoryManager`: it allocates resource and page-table pages, maps them, uses the
+real DMA addresses in the Haswell PPGTT model, submits a dword write, and
+completes unbind/destroy/remove cleanup. That path passed on 2026-11-20 under
+QEMU 10.0.13 TCG with a Debian 6.12.117 guest; the serial log is
+`tests/qemu-dma/evidence-2026-11-20-native-dma-backend.log`. It is not part of
 `make test` and does not validate Haswell DMA or change host i915 ownership. See
 [`tests/qemu-dma/README.md`](tests/qemu-dma/README.md) for run instructions and
 the evidence required for a pass.

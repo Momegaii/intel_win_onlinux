@@ -8,7 +8,7 @@ BUILD := build
 BIN := $(BUILD)/idwctl
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
-.PHONY: all clean test contract-test backend-contract-test i915-resource-test i915-memory-backend-test gpu-submission-test memory-manager-test host-memory-backend-test abi-test ppgtt-model-test pt-dma-adapter-test ggtt-allocator-test haswell-gtt-hw-test device-lifecycle-test stage3a-test stage3a-sanitize-test cli-test gpu-test gpu-resource-test gpu-memory-test gpu-memory-manager-test gpu-resource-write-test qemu-dma-test install-user install-system-helper kernel kernel-clean
+.PHONY: all clean test contract-test backend-contract-test i915-resource-test i915-memory-backend-test gpu-submission-test memory-manager-test host-memory-backend-test native-dma-backend-test native-dma-backend-test-static abi-test ppgtt-model-test pt-dma-adapter-test ggtt-allocator-test haswell-gtt-hw-test device-lifecycle-test stage3a-test stage3a-sanitize-test cli-test gpu-test gpu-resource-test gpu-memory-test gpu-memory-manager-test gpu-resource-write-test qemu-dma-test install-user install-system-helper kernel kernel-clean
 all: $(BIN)
 $(BUILD)/gpuva_model.o: src/gpuva_model.c include/idw/gpuva_model.h \
 		include/idw/contracts/base.h
@@ -65,6 +65,37 @@ host-memory-backend-test:
 		tests/host-memory-backend-test.cpp \
 		-o $(BUILD)/host-memory-backend-test
 	./$(BUILD)/host-memory-backend-test
+native-dma-backend-test:
+	@mkdir -p $(BUILD)
+	$(CC) -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+		-c src/gpuva_model.c -o $(BUILD)/gpuva_model-native-dma-test.o
+	$(CC) -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+		-c src/page_table_memory.c -o $(BUILD)/page_table_memory-native-dma-test.o
+	$(CC) -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+		-c src/haswell_ppgtt_model.c -o $(BUILD)/haswell_ppgtt_model-native-dma-test.o
+	$(CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -Iinclude \
+		src/memory_manager.cpp src/native_dma_backend.cpp \
+		$(BUILD)/gpuva_model-native-dma-test.o \
+		$(BUILD)/page_table_memory-native-dma-test.o \
+		$(BUILD)/haswell_ppgtt_model-native-dma-test.o \
+		tests/native-dma-backend-test.cpp \
+		-o $(BUILD)/native-dma-backend-test
+	./$(BUILD)/native-dma-backend-test
+native-dma-backend-test-static:
+	@mkdir -p $(BUILD)
+	$(CC) -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+		-c src/gpuva_model.c -o $(BUILD)/gpuva_model-native-dma-static.o
+	$(CC) -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+		-c src/page_table_memory.c -o $(BUILD)/page_table_memory-native-dma-static.o
+	$(CC) -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+		-c src/haswell_ppgtt_model.c -o $(BUILD)/haswell_ppgtt_model-native-dma-static.o
+	$(CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -Iinclude -static \
+		src/memory_manager.cpp src/native_dma_backend.cpp \
+		$(BUILD)/gpuva_model-native-dma-static.o \
+		$(BUILD)/page_table_memory-native-dma-static.o \
+		$(BUILD)/haswell_ppgtt_model-native-dma-static.o \
+		tests/native-dma-backend-test.cpp \
+		-o $(BUILD)/native-dma-backend-test-static
 i915-memory-backend-test: $(BUILD)/gpuva_model.o
 	$(CXX) $(CPPFLAGS) -std=c++17 -Wall -Wextra -Werror -Iinclude \
 		src/memory_manager.cpp src/i915_gem_resource_backend.cpp \
@@ -131,7 +162,7 @@ stage3a-sanitize-test:
 	ASAN_OPTIONS=detect_leaks=1 ./build/sanitize/haswell-gtt-hw-test
 cli-test: all
 	./tests/cli-arguments-smoke.sh
-test: all contract-test backend-contract-test i915-resource-test i915-memory-backend-test gpu-submission-test memory-manager-test host-memory-backend-test abi-test ppgtt-model-test pt-dma-adapter-test ggtt-allocator-test haswell-gtt-hw-test device-lifecycle-test cli-test
+test: all contract-test backend-contract-test i915-resource-test i915-memory-backend-test gpu-submission-test memory-manager-test host-memory-backend-test native-dma-backend-test abi-test ppgtt-model-test pt-dma-adapter-test ggtt-allocator-test haswell-gtt-hw-test device-lifecycle-test cli-test
 	./tests/smoke.sh
 	./tests/gem-resource-backend-smoke.sh
 	./tests/kernel-query-smoke.sh

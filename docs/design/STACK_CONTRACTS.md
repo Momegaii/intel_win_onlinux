@@ -143,14 +143,19 @@ hardware-tested; i915 continues to own the mappings and execution.
 `HostMemoryBackend` now supplies a real IDW-owned host-RAM backing path through
 the same callback table: a zero-faulted `memfd` mapping with CPU access and
 synchronous host writes. It is not GEM, not DMA-mapped, not GPU-visible, and
-does not populate or publish page tables. The fake test backend remains only a
-deterministic test double. None of these paths is IDW-owned hardware memory
-management or native DMA.
+does not populate or publish page tables. `NativeDmaMemoryBackend` adds a
+device-scoped test path: it obtains coherent resource and page-table pages
+from the QEMU EDU test module, maps them, and uses the returned DMA addresses in
+the Haswell PPGTT model. The fake test backend remains only a deterministic
+test double. Only the native path has real DMA addresses, and only for a
+virtual test device; none of these paths is IDW-owned Haswell hardware memory
+management.
 
 Page allocations and page-sized mapped addresses are tagged with an opaque
 device scope and lifetime cookie. The CPU model rejects cross-scope table pages
-and PTE mappings. These test tokens are synthetic; their validation does not
-establish device identity, DMA mapping, synchronization, or GPU visibility.
+and PTE mappings. Synthetic tokens validate contracts only. The QEMU native
+path uses real kernel DMA addresses, but the page directory and page walk remain
+software; that does not establish a Haswell GPU mapping or hardware page walk.
 
 ## Completion gates
 

@@ -951,3 +951,41 @@ gaps found by comparing the code with Linux i915 and by failure testing:
   reset/recovery, and the reversible first page-walk experiment.
 
 No physical GPU operation was performed. i915 remains bound and owns the GPU.
+
+### Native DMA resource backing through MemoryManager
+
+Connected the existing `MemoryManager` and Haswell PPGTT model to a real
+device-scoped DMA provider in the QEMU EDU guest:
+
+- Added `NativeDmaMemoryBackend`. It allocates coherent resource pages and
+  page-table pages through `/dev/idw-edu-dma`, maps them, resolves real DMA
+  segments, populates the PPGTT model, translates GPU VA to DMA, performs
+  synchronous dword submissions, and tears down in manager order.
+- Added test-only UAPI `include/uapi/idw_dma_test.h` and the
+  `/dev/idw-edu-dma` misc device with resource alloc/free/segments/sync,
+  page-table alloc/free/sync, and cookie-scoped mmap.
+- Added `tests/native-dma-backend-test.cpp` plus native and static Makefile
+  targets. The guest init runs the static test after the kernel self-test and
+  before unloading the module, so provider remove cleanup remains part of the
+  success condition.
+- Fixed two lifecycle defects found by the QEMU run: resource mmap must be
+  removed before `FREE` so the kernel mapping count reaches zero, and the
+  PPGTT pending-invalidation query requires `pending.size` to be initialized.
+- Extended the kernel self-test to verify a 3-page resource DMA round trip,
+  39-bit PTE encoding, PPGTT page-table consumption, sync, and cleanup.
+
+Validation:
+
+```text
+PASS: native DMA backing, real DMA addresses, PPGTT translation, submission, and cleanup
+IDW_QEMU_DMA: 3-page resource backing DMA, 39-bit validation, PPGTT PTE consumption, sync, and cleanup verified
+IDW_QEMU_DMA: remove freed outstanding provider allocations=yes result=0
+IDW_QEMU_DMA: PASS: probe, page-table DMA, 32 DMA cycles, cleanup and remove completed
+QEMU exit status: 33
+```
+
+The run used QEMU 10.0.13 TCG and a Debian `6.12.117+deb13-amd64` guest.
+Evidence: `tests/qemu-dma/evidence-2026-11-20-native-dma-backend.log`.
+The page directory is anonymous user memory and the page walk is the CPU
+model. No physical Haswell DMA, MMIO, BAR, or i915 ownership change occurred;
+i915 remains bound on the host.

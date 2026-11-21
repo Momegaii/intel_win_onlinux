@@ -1,7 +1,25 @@
 IDW PROJECT SNAPSHOT
-Version: 1.4.0-host-backing
+Version: 1.5.0-native-dma-backing
 Target: Intel HD Graphics 4600 / Haswell GT2 / PCI 8086:0412
 Host driver ownership: i915
+
+2026-11-20 Native DMA resource backing through MemoryManager:
+Added `NativeDmaMemoryBackend`, the first IDW-owned backing provider that
+returns real Linux DMA addresses for resource pages, not only page-table
+pages. It allocates DMA-mapped resource pages and coherent page-table pages through the QEMU EDU
+test module (`/dev/idw-edu-dma`), maps them into user space, populates the
+existing Haswell Gen7.5 PPGTT model with the returned DMA addresses, and
+implements the complete `MemoryBackendOps` table. The QEMU test runs through
+`MemoryManager`: create, bind, real DMA segment lookup, PPGTT translation, CPU
+dword access, write submission/wait/readback, destroy-while-bound rejection,
+unbind, destroy, and cleanup. The kernel self-test also performs a 3-page
+resource DMA round trip, 39-bit PTE validation, PPGTT page-table consumption,
+and cleanup. QEMU EDU TCG passed with `QEMU exit status: 33` and remove cleanup
+`result=0`; evidence is
+`tests/qemu-dma/evidence-2026-11-20-native-dma-backend.log`. The page directory
+and page walk remain simulated, the UAPI is test-only, and no physical Haswell
+DMA, MMIO, BAR, or i915 ownership change occurred. Report:
+`docs/design/NATIVE_DMA_RESOURCE_BACKING_IMPLEMENTATION.md`.
 
 2026-11-20 Host-RAM backing provider:
 Added `HostMemoryBackend`, a real `MemoryBackendOps` provider integrated with

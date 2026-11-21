@@ -18,6 +18,15 @@ teardown to free. DMA write/read barriers surround the coherent-buffer
 transfers. The guest runner unloads the test driver so its PCI `remove` callback
 and provider cleanup are part of the success condition.
 
+After the kernel self-test, the guest runs the static
+`native-dma-backend-test`. It uses `NativeDmaMemoryBackend` through
+`MemoryManager`: allocate resource backing, map it, bind it at a fixed GPU VA,
+read the real DMA segments, translate through the Haswell Gen7.5 PPGTT model,
+write/read a dword from the CPU, submit a dword write and wait, reject destroy
+while bound, unbind, destroy, and close. The test must print
+`PASS: native DMA backing, real DMA addresses, PPGTT translation, submission,
+and cleanup`.
+
 ## Run
 
 The runner uses TCG only; it does not use KVM. It defaults to the current
@@ -64,7 +73,20 @@ IDW_QEMU_DMA: PASS: probe, page-table DMA, 32 DMA cycles, cleanup and remove com
 QEMU exit status: 33
 ```
 
+The same run now also executes the native backend:
+
+```text
+IDW_QEMU_DMA: 3-page resource backing DMA, 39-bit validation, PPGTT PTE consumption, sync, and cleanup verified
+PASS: native DMA backing, real DMA addresses, PPGTT translation, submission, and cleanup
+IDW_QEMU_DMA: remove freed outstanding provider allocations=yes result=0
+IDW_QEMU_DMA: PASS: probe, page-table DMA, 32 DMA cycles, cleanup and remove completed
+QEMU exit status: 33
+```
+
 The full serial log is
+`tests/qemu-dma/evidence-2026-11-20-native-dma-backend.log` (SHA-256
+`0c7ac5cb92c9aed9acaaf6e8bc2709ed584541bbff981a90543692258328eedf`). The
+earlier page-table-only log is
 `tests/qemu-dma/evidence-2026-11-20-tcg-page-table-corrected.log` (SHA-256
 `393140205e06fbb6b9e3eaad161eb6181fed9ca9c3274e11108df0693836f22a`).
 The earlier `evidence-2026-11-20-tcg-page-table.log` used the superseded
@@ -74,8 +96,8 @@ shared PDE/PTE encoder and is retained as historical evidence only.
 
 A successful run must show the `IDW_QEMU_DMA: PASS` serial marker and QEMU
 debug-exit status 33. The guest log must also report verified page-table DMA
-layout visibility, verified DMA cycles, and that remove freed an outstanding
-provider page. The guest init process emits
+layout visibility, verified DMA cycles, the native backend `PASS` marker, and
+that remove freed an outstanding provider page. The guest init process emits
 the final pass marker and debug-exit signal only after the driver-unload
 syscall returns. Compilation, software tests,
 or a QEMU boot without those signals are not a pass. Even a successful QEMU

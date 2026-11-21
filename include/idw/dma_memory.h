@@ -5,12 +5,24 @@
 #include <linux/device.h>
 #include <linux/dma-mapping.h>
 #include <linux/list.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/types.h>
+#include "contracts/page_table_memory.h"
 
 #define IDW_DMA_ADDRESS_BITS 40
 #define IDW_DMA_ADDRESS_MASK DMA_BIT_MASK(IDW_DMA_ADDRESS_BITS)
+
+/*
+ * Haswell Gen7.5 resource pages are addressed by PPGTT PTEs limited to 39
+ * bits. Page-directory/page-table storage may use the full 40-bit DMA mask.
+ * Resource backing is therefore checked against a stricter mask.
+ */
+#define IDW_DMA_RESOURCE_ADDRESS_BITS 39
+#define IDW_DMA_RESOURCE_ADDRESS_MASK DMA_BIT_MASK(IDW_DMA_RESOURCE_ADDRESS_BITS)
+#define IDW_DMA_RESOURCE_MAX_BYTES (64ULL * 1024 * 1024)
+#define IDW_DMA_RESOURCE_MAX_PAGES (IDW_DMA_RESOURCE_MAX_BYTES / PAGE_SIZE)
 
 struct idw_dma_provider_page {
 	struct list_head link;
@@ -28,6 +40,29 @@ struct idw_dma_page_info {
 	u64 allocation_cookie;
 };
 
+struct idw_dma_resource_page {
+	struct page *page;
+	void *cpu_address;
+	dma_addr_t dma_address;
+	u64 mapping_cookie;
+};
+
+/*
+ * Resource backing uses individual pages plus per-page DMA mappings. It does
+ * not require one physically contiguous coherent allocation.
+ */
+struct idw_dma_resource {
+	struct list_head link;
+	u64 cookie;
+	u64 bytes;
+	u64 device_cookie;
+	u64 generation;
+	u32 page_count;
+	u32 mappings;
+	enum dma_data_direction direction;
+	struct idw_dma_resource_page *pages;
+};
+
 /*
  * The provider storage must be zero-initialized. The owning PCI driver's
  * probe configures both DMA masks before init; init runs from probe and fini
@@ -42,9 +77,11 @@ struct idw_dma_provider {
 	struct module *owner;
 	struct mutex lock;
 	struct list_head pages;
+	struct list_head resources;
 	u64 device_cookie;
 	u64 generation;
 	u64 next_cookie;
+	u64 next_mapping_cookie;
 	bool active;
 };
 
@@ -56,5 +93,19 @@ int idw_dma_page_alloc(struct idw_dma_provider *provider,
 		       struct idw_dma_page_info *info);
 int idw_dma_page_free(struct idw_dma_provider *provider,
 		      const struct idw_dma_page_info *info);
+
+int idw_dma_resource_alloc(struct idw_dma_provider *provider, u64 bytes,
+			   enum dma_data_direction direction,
+			   struct idw_dma_resource *resource);
+int idw_dma_resource_segments(const struct idw_dma_resource *resource,
+			      u64 offset, u64 bytes,
+			      struct idw_dma_segment *segments,
+			      u32 segment_capacity, u32 *segment_count);
+int idw_dma_resource_sync(struct idw_dma_provider *provider,
+			  const struct idw_dma_resource *resource,
+			  u64 offset, u64 bytes,
+			  enum dma_data_direction direction);
+int idw_dma_resource_free(struct idw_dma_provider *provider,
+			  struct idw_dma_resource *resource);
 
 #endif

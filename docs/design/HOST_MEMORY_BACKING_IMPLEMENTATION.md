@@ -246,3 +246,17 @@ The test passed under ASan/UBSan with leak detection.
 The host provider is a real backing-allocation step, not a physical GPU
 backend. CPU tests, simulation, QEMU, and i915-assisted execution remain
 separate evidence levels.
+
+## 9. Follow-on: device-scoped resource backing
+
+The missing DMA resource mapping from section 4 is now implemented as a
+test-only QEMU path. `NativeDmaMemoryBackend` allocates real DMA-mapped resource
+pages and coherent page-table pages through `/dev/idw-edu-dma`, maps them into user space,
+feeds the real DMA addresses to the existing Haswell PPGTT model, and completes
+`MemoryManager` bind/submit/unbind/destroy lifecycles.
+
+This does not change the host provider's claims. It adds a separate provider
+for the QEMU EDU virtual device. The directory and page walk remain simulated;
+no physical Haswell operation occurred. See
+`docs/design/NATIVE_DMA_RESOURCE_BACKING_IMPLEMENTATION.md` and
+`tests/qemu-dma/evidence-2026-11-20-native-dma-backend.log`.

@@ -1,5 +1,13 @@
 # Change log
 
+## 2026-11-20 — Native DMA resource backing through MemoryManager
+- Added `NativeDmaMemoryBackend` (`include/idw/native_dma_backend.hpp`, `src/native_dma_backend.cpp`): allocates device-scoped DMA-mapped resource pages and coherent page-table pages through the QEMU EDU test module, mmaps them, feeds real DMA addresses to the Haswell Gen7.5 PPGTT model, and implements the full `MemoryBackendOps` table.
+- Added test-only UAPI `include/uapi/idw_dma_test.h` and `/dev/idw-edu-dma` in `kernel/idw_edu_dma_test_main.c` for resource alloc/free/segments/sync, page-table alloc/free/sync, and cookie-scoped mmap.
+- Added `tests/native-dma-backend-test.cpp`, `make native-dma-backend-test`, and a static build for the guest. The test runs through `MemoryManager`: create, bind, real DMA segment lookup, PPGTT translation, CPU dword access, write submission/wait/readback, destroy-while-bound rejection, unbind, destroy, and cleanup.
+- Extended the kernel self-test with a 3-page resource-backing check: real DMA round trip, 39-bit PTE validation, PPGTT page-table consumption, sync, and cleanup.
+- QEMU EDU TCG run passed: `QEMU exit status: 33`, native backend `PASS`, resource backing DMA verified, and provider remove cleanup `result=0`. Evidence: `tests/qemu-dma/evidence-2026-11-20-native-dma-backend.log`.
+- Added `docs/design/NATIVE_DMA_RESOURCE_BACKING_IMPLEMENTATION.md`. The page directory and page walk remain simulated; no physical Haswell DMA, MMIO, BAR, or i915 ownership change occurred.
+
 ## 2026-11-20 — Host-RAM backing provider
 - Added `include/idw/host_memory_backend.hpp` / `src/host_memory_backend.cpp`: an IDW-owned `MemoryBackendOps` provider that creates a real `memfd`, sizes it, maps it, and zero-faults every page. It supports CPU dword access and synchronous host writes, and refuses destroy while bound.
 - Integrated the provider with the existing `MemoryManager`; no new manager layer was added. `bind` records the manager-reserved GPU VA, `invalidate` is a validated no-op, and fences are already complete.
