@@ -239,10 +239,42 @@ static int test_invalid_config(void)
     return 0;
 }
 
+
+static int test_missing_fini_poison(void)
+{
+    static const struct idw_device_stage bad_stages[2] = {
+        { "claim", stage0_init, NULL },
+        { "bars", stage1_init, stage1_fini }
+    };
+    struct idw_device_lifecycle_config config;
+    struct idw_device_lifecycle lifecycle;
+    struct fake_context context;
+
+    reset_context(&context);
+    context.fail_init = 1;
+    memset(&config, 0, sizeof(config));
+    config.size = sizeof(config);
+    config.version = IDW_DEVICE_LIFECYCLE_VERSION;
+    config.vendor_id = IDW_VENDOR_INTEL;
+    config.device_id = IDW_DEVICE_HASWELL_GT2;
+    config.stage_count = 2;
+    config.exclusive = true;
+    config.scope.device_cookie = 0x1234;
+    config.scope.generation = 1;
+    config.stages = bad_stages;
+    CHECK(idw_device_lifecycle_init(&lifecycle, &config, &context) == 0);
+    CHECK(idw_device_lifecycle_start(&lifecycle) == -EIO);
+    CHECK(idw_device_lifecycle_is_poisoned(&lifecycle));
+    CHECK(idw_device_lifecycle_completed(&lifecycle) == 1u);
+    CHECK(idw_device_lifecycle_destroy(&lifecycle) == -EBUSY);
+    return 0;
+}
+
 int main(void)
 {
     if (test_ownership_rejection() || test_teardown_and_recovery() ||
-        test_failure_poison() || test_invalid_config())
+        test_failure_poison() || test_invalid_config() ||
+        test_missing_fini_poison())
         return 1;
     printf("PASS: independent-device ownership, teardown, and recovery tests\n");
     return 0;

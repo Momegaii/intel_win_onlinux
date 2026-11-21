@@ -37,6 +37,8 @@ struct fake_page_allocator {
     unsigned wrong_scope_on_call;
     unsigned allocated;
     unsigned freed;
+    unsigned syncs;
+    unsigned sync_fail_call;
     uint64_t last_dma;
 };
 
@@ -87,6 +89,17 @@ static int fake_alloc_page(void *context, struct idw_dma_page *page)
     }
     ++allocator->allocated;
     return 0;
+}
+
+static int fake_sync_page(void *context, const struct idw_dma_page *page,
+                          uint32_t offset, uint32_t bytes)
+{
+    struct fake_page_allocator *allocator = context;
+
+    if (!page || offset || bytes != IDW_HASWELL_PPGTT_PAGE_SIZE)
+        return -EINVAL;
+    ++allocator->syncs;
+    return allocator->sync_fail_call == allocator->syncs ? -EIO : 0;
 }
 
 static void fake_free_page(void *context, struct idw_dma_page *page)
@@ -195,6 +208,7 @@ static void fake_ops_init(struct idw_hsw_ppgtt_page_ops *ops,
         .scope = TEST_DEVICE_SCOPE,
         .alloc_page_table_page = fake_alloc_page,
         .free_page_table_page = fake_free_page,
+        .sync_page_table_for_device = fake_sync_page,
         .context = allocator
     };
 }
@@ -590,6 +604,7 @@ static int test_directory_residency_and_writes(void)
     CHECK(fake.reads == IDW_HSW_PPGTT_PDES);
     CHECK(fake.flushes == 1);
     CHECK(idw_hsw_ppgtt_map(model, 0, 4096, page, 1) == 0);
+    CHECK(allocator.syncs == 2);
     CHECK(fake.writes == IDW_HSW_PPGTT_PDES + 1);
     CHECK(fake.flushes == 2);
     CHECK(idw_hsw_ppgtt_pde(model, 0) == 0x06000001u);
@@ -771,11 +786,35 @@ static int test_active_pde_publication_rejected(void)
     return 0;
 }
 
+
+static int test_page_table_sync_failure(void)
+{
+    struct fake_page_allocator allocator = {
+        .next_dma = 0x0a000000,
+        .sync_fail_call = 2
+    };
+    struct fake_directory fake;
+    struct idw_hsw_ppgtt_model *model = NULL;
+    const struct idw_dma_page_mapping page[] = {
+        TEST_DMA_PAGE(0xa0000000)
+    };
+
+    fake_directory_init(&fake);
+    CHECK(create_model(&model, &allocator, &fake) == 0);
+    CHECK(idw_hsw_ppgtt_map(model, 0, 4096, page, 1) == -EIO);
+    CHECK(idw_hsw_ppgtt_check_submit(model) == -EIO);
+    CHECK(allocator.syncs == 2);
+    CHECK(idw_hsw_ppgtt_model_destroy_checked(model, false) == 0);
+    CHECK(allocator.allocated == allocator.freed);
+    return 0;
+}
+
 int main(void)
 {
     if (test_gpuva_space() || test_golden_encoding() ||
         test_geometry_and_lifecycle() || test_invalid_maps_and_rollback() ||
         test_failed_invalidation_poison() ||
+        test_page_table_sync_failure() ||
         test_invalidation_generation_coalescing() ||
         test_directory_residency_and_writes() ||
         test_directory_validation() || test_reclaim_failure_rollback() ||

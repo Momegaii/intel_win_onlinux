@@ -16,6 +16,29 @@ static int provider_check(const struct idw_ggtt_directory_provider *provider)
     return idw_hsw_hw_check(provider->hw);
 }
 
+static int directory_check(
+    const struct idw_ggtt_directory_provider *provider,
+    const struct idw_hsw_ppgtt_directory *directory)
+{
+    struct idw_ggtt_allocation_info info = { .size = sizeof(info) };
+    int ret;
+
+    if (!directory || directory->size != sizeof(*directory) ||
+        directory->version != IDW_HSW_PPGTT_DIRECTORY_VERSION ||
+        !directory->allocation_cookie ||
+        !idw_pt_scope_equal(&provider->scope, &directory->scope))
+        return -EXDEV;
+    ret = idw_ggtt_query(provider->ggtt, directory->ggtt_offset,
+                         directory->allocation_cookie, &info);
+    if (ret)
+        return -EINVAL;
+    if (info.bytes != directory->bytes ||
+        !(info.flags & IDW_GGTT_ALLOC_PAGE_DIRECTORY) ||
+        !(info.flags & IDW_GGTT_ALLOC_PINNED) || !info.resident)
+        return -EINVAL;
+    return 0;
+}
+
 static int zero_directory(struct idw_ggtt_directory_provider *provider,
                           uint64_t ggtt_offset)
 {
@@ -102,6 +125,10 @@ static void free_directory(void *context,
         provider->poisoned = 1;
         return;
     }
+    if (directory_check(provider, directory)) {
+        provider->poisoned = 1;
+        return;
+    }
     ret = zero_directory(provider, directory->ggtt_offset);
     if (ret)
         provider->poisoned = 1;
@@ -133,11 +160,11 @@ static int write_pde_gttaddr(void *context,
     ret = provider_check(provider);
     if (ret)
         return ret;
-    if (!directory || directory->size != sizeof(*directory) ||
-        directory->version != IDW_HSW_PPGTT_DIRECTORY_VERSION ||
-        !directory->allocation_cookie ||
-        !idw_pt_scope_equal(&provider->scope, &directory->scope))
-        return -EXDEV;
+    ret = directory_check(provider, directory);
+    if (ret)
+        return ret;
+    if (idw_hsw_hw_is_active(provider->hw))
+        return -EBUSY;
     return idw_hsw_hw_write_pde(provider->hw, directory->ggtt_offset,
                                 index, pde);
 }
@@ -152,11 +179,9 @@ static int read_pde_gttaddr(void *context,
     ret = provider_check(provider);
     if (ret)
         return ret;
-    if (!directory || directory->size != sizeof(*directory) ||
-        directory->version != IDW_HSW_PPGTT_DIRECTORY_VERSION ||
-        !directory->allocation_cookie ||
-        !idw_pt_scope_equal(&provider->scope, &directory->scope))
-        return -EXDEV;
+    ret = directory_check(provider, directory);
+    if (ret)
+        return ret;
     return idw_hsw_hw_read_pde(provider->hw, directory->ggtt_offset,
                                index, pde);
 }
@@ -170,11 +195,9 @@ static int flush_gtt(void *context,
     ret = provider_check(provider);
     if (ret)
         return ret;
-    if (!directory || directory->size != sizeof(*directory) ||
-        directory->version != IDW_HSW_PPGTT_DIRECTORY_VERSION ||
-        !directory->allocation_cookie ||
-        !idw_pt_scope_equal(&provider->scope, &directory->scope))
-        return -EXDEV;
+    ret = directory_check(provider, directory);
+    if (ret)
+        return ret;
     return idw_hsw_hw_flush_gtt(provider->hw);
 }
 

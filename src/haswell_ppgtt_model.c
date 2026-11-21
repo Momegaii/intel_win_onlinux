@@ -99,6 +99,16 @@ static int write_pde(struct idw_hsw_ppgtt_model *model, uint32_t index,
     return 0;
 }
 
+static int sync_table(struct idw_hsw_ppgtt_model *model,
+                      const struct idw_hsw_pt *table)
+{
+    int ret = model->page_ops.sync_page_table_for_device(
+        model->page_ops.context, &table->page, 0,
+        IDW_HASWELL_PPGTT_PAGE_SIZE);
+
+    return ret ? (ret < 0 ? ret : -EIO) : 0;
+}
+
 static int flush_directory(struct idw_hsw_ppgtt_model *model)
 {
     int ret = model->directory_ops.flush_gtt(model->directory_ops.context,
@@ -173,6 +183,13 @@ static int allocate_table(struct idw_hsw_ppgtt_model *model,
         return -EINVAL;
     }
     memset(table->page.cpu_address, 0, IDW_HASWELL_PPGTT_PAGE_SIZE);
+    ret = sync_table(model, table);
+    if (ret) {
+        model->page_ops.free_page_table_page(model->page_ops.context,
+                                             &table->page);
+        free(table);
+        return ret;
+    }
     table->empty = true;
     *out = table;
     return 0;
@@ -276,7 +293,9 @@ int idw_hsw_ppgtt_model_create(
     *out = NULL;
     if (!page_ops || page_ops->size != sizeof(*page_ops) ||
         page_ops->version != 1 || !page_ops->alloc_page_table_page ||
-        !page_ops->free_page_table_page || !page_ops->scope.device_cookie ||
+        !page_ops->free_page_table_page ||
+        !page_ops->sync_page_table_for_device ||
+        !page_ops->scope.device_cookie ||
         !page_ops->scope.generation)
         return -EINVAL;
     if (!directory_ops || directory_ops->size != sizeof(*directory_ops) ||
@@ -363,6 +382,7 @@ int idw_hsw_ppgtt_map(struct idw_hsw_ppgtt_model *model,
                       uint64_t page_count)
 {
     struct idw_hsw_staged_table staged[IDW_HSW_PPGTT_PDES];
+    bool sync_needed[IDW_HSW_PPGTT_PDES] = { false };
     uint32_t staged_count = 0;
     uint32_t written_count = 0;
     uint32_t written_index[IDW_HSW_PPGTT_PDES];
@@ -470,6 +490,16 @@ int idw_hsw_ppgtt_map(struct idw_hsw_ppgtt_model *model,
             return ret;
         ((uint32_t *)model->tables[pde]->page.cpu_address)[pte] = pte_entry;
         model->tables[pde]->empty = false;
+        sync_needed[pde] = true;
+    }
+    for (i = 0; i < IDW_HSW_PPGTT_PDES; ++i) {
+        if (!sync_needed[i])
+            continue;
+        ret = sync_table(model, model->tables[i]);
+        if (ret) {
+            model->poisoned = true;
+            return ret;
+        }
     }
     ret = mark_dirty(model, va, bytes);
     if (ret) {
@@ -505,24 +535,37 @@ int idw_hsw_ppgtt_unmap(struct idw_hsw_ppgtt_model *model,
     if (model->generation == UINT64_MAX)
         return -EOVERFLOW;
     page_count = bytes / IDW_HASWELL_PPGTT_PAGE_SIZE;
+    {
+        bool sync_needed[IDW_HSW_PPGTT_PDES] = { false };
 
-    for (i = 0; i < page_count; ++i) {
-        uint64_t page_va = va + i * IDW_HASWELL_PPGTT_PAGE_SIZE;
-        uint32_t pde = (uint32_t)(page_va >> IDW_HASWELL_PPGTT_PDE_SHIFT);
-        uint32_t pte = (uint32_t)((page_va >> 12) & 0x3ffu);
+        for (i = 0; i < page_count; ++i) {
+            uint64_t page_va = va + i * IDW_HASWELL_PPGTT_PAGE_SIZE;
+            uint32_t pde = (uint32_t)(page_va >> IDW_HASWELL_PPGTT_PDE_SHIFT);
+            uint32_t pte = (uint32_t)((page_va >> 12) & 0x3ffu);
 
-        if (!model->tables[pde] ||
-            !(((uint32_t *)model->tables[pde]->page.cpu_address)[pte] &
-              IDW_HSW_PPGTT_PTE_VALID))
-            return -ENOENT;
-    }
-    for (i = 0; i < page_count; ++i) {
-        uint64_t page_va = va + i * IDW_HASWELL_PPGTT_PAGE_SIZE;
-        uint32_t pde = (uint32_t)(page_va >> IDW_HASWELL_PPGTT_PDE_SHIFT);
-        uint32_t pte = (uint32_t)((page_va >> 12) & 0x3ffu);
+            if (!model->tables[pde] ||
+                !(((uint32_t *)model->tables[pde]->page.cpu_address)[pte] &
+                  IDW_HSW_PPGTT_PTE_VALID))
+                return -ENOENT;
+        }
+        for (i = 0; i < page_count; ++i) {
+            uint64_t page_va = va + i * IDW_HASWELL_PPGTT_PAGE_SIZE;
+            uint32_t pde = (uint32_t)(page_va >> IDW_HASWELL_PPGTT_PDE_SHIFT);
+            uint32_t pte = (uint32_t)((page_va >> 12) & 0x3ffu);
 
-        ((uint32_t *)model->tables[pde]->page.cpu_address)[pte] = 0;
-        model->tables[pde]->empty = pt_empty(model->tables[pde]);
+            ((uint32_t *)model->tables[pde]->page.cpu_address)[pte] = 0;
+            model->tables[pde]->empty = pt_empty(model->tables[pde]);
+            sync_needed[pde] = true;
+        }
+        for (i = 0; i < IDW_HSW_PPGTT_PDES; ++i) {
+            if (!sync_needed[i])
+                continue;
+            ret = sync_table(model, model->tables[i]);
+            if (ret) {
+                model->poisoned = true;
+                return ret;
+            }
+        }
     }
     return mark_dirty(model, va, bytes);
 }

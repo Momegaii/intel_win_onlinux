@@ -12,6 +12,7 @@
 struct idw_hsw_hw_saved_engine {
     uint32_t dclv;
     uint32_t dir_base;
+    uint32_t ring_mode;
 };
 
 struct idw_hsw_hw {
@@ -105,6 +106,12 @@ static int restore_engines(struct idw_hsw_hw *hw, uint32_t mask)
             hw->saved[index].dir_base);
         if (ret && !first_error)
             first_error = ret;
+        ret = hw->ops.write32(
+            hw->context,
+            engine_reg(engines[i], IDW_HSW_RING_MODE_GEN7(0)),
+            hw->saved[index].ring_mode);
+        if (ret && !first_error)
+            first_error = ret;
     }
     return first_error;
 }
@@ -128,6 +135,31 @@ static int disable_engines(struct idw_hsw_hw *hw, uint32_t mask)
     return first_error;
 }
 
+static int verify_engine_state(struct idw_hsw_hw *hw, uint32_t mask,
+                               bool enabled)
+{
+    uint32_t engines[] = {
+        IDW_HSW_ENGINE_RENDER, IDW_HSW_ENGINE_BLITTER, IDW_HSW_ENGINE_VIDEO
+    };
+    uint32_t i;
+
+    for (i = 0; i < sizeof(engines) / sizeof(engines[0]); ++i) {
+        uint32_t value;
+        int ret;
+
+        if (!(mask & engines[i]))
+            continue;
+        ret = hw->ops.read32(
+            hw->context,
+            engine_reg(engines[i], IDW_HSW_RING_MODE_GEN7(0)), &value);
+        if (ret)
+            return ret;
+        if (!!(value & IDW_HSW_RING_MODE_PPGTT_ENABLE) != enabled)
+            return -EIO;
+    }
+    return 0;
+}
+
 static int rollback_activation(struct idw_hsw_hw *hw, uint32_t enabled,
                                uint32_t saved_mask)
 {
@@ -135,6 +167,9 @@ static int rollback_activation(struct idw_hsw_hw *hw, uint32_t enabled,
     int first_error;
 
     first_error = disable_engines(hw, enabled);
+    ret = verify_engine_state(hw, enabled, false);
+    if (ret && !first_error)
+        first_error = ret;
     ret = restore_engines(hw, saved_mask);
     if (ret && !first_error)
         first_error = ret;
@@ -149,10 +184,13 @@ static int rollback_activation(struct idw_hsw_hw *hw, uint32_t enabled,
         if (ret && !first_error)
             first_error = ret;
     }
-    if (first_error)
+    if (first_error) {
         poison(hw);
-    else
+        hw->active = true;
+        hw->active_engines = saved_mask ? saved_mask : enabled;
+    } else {
         hw->saved_mask = 0;
+    }
     return first_error;
 }
 
@@ -178,10 +216,18 @@ static int snapshot_engines(struct idw_hsw_hw *hw, uint32_t mask)
             return ret;
         ret = hw->ops.read32(
             hw->context,
-            engine_reg(engines[i], IDW_HSW_RING_PP_DIR_BASE_READ(0)),
+            engine_reg(engines[i], IDW_HSW_RING_PP_DIR_BASE(0)),
             &hw->saved[index].dir_base);
         if (ret)
             return ret;
+        ret = hw->ops.read32(
+            hw->context,
+            engine_reg(engines[i], IDW_HSW_RING_MODE_GEN7(0)),
+            &hw->saved[index].ring_mode);
+        if (ret)
+            return ret;
+        if (hw->saved[index].ring_mode & IDW_HSW_RING_MODE_PPGTT_ENABLE)
+            return -EBUSY;
         hw->saved_mask |= engines[i];
     }
     return 0;
@@ -385,7 +431,8 @@ int idw_hsw_hw_activate(struct idw_hsw_hw *hw, uint32_t engine_mask,
     ret = snapshot_engines(hw, engine_mask);
     if (ret) {
         hw->saved_mask = 0;
-        poison(hw);
+        if (ret != -EBUSY)
+            poison(hw);
         return ret;
     }
     ret = program_engines(hw, engine_mask, directory_ggtt);
@@ -405,6 +452,11 @@ int idw_hsw_hw_activate(struct idw_hsw_hw *hw, uint32_t engine_mask,
             return ret;
         }
         enabled |= engines[i];
+    }
+    ret = verify_engine_state(hw, engine_mask, true);
+    if (ret) {
+        rollback_activation(hw, enabled, hw->saved_mask);
+        return ret;
     }
     ret = idw_hsw_hw_invalidate(hw, engine_mask);
     if (ret) {
@@ -432,6 +484,9 @@ int idw_hsw_hw_deactivate(struct idw_hsw_hw *hw)
     active_engines = hw->active_engines;
     saved_mask = hw->saved_mask;
     first_error = disable_engines(hw, active_engines);
+    ret = verify_engine_state(hw, active_engines, false);
+    if (ret && !first_error)
+        first_error = ret;
     ret = idw_hsw_hw_invalidate(hw, active_engines);
     if (ret && !first_error)
         first_error = ret;
@@ -487,9 +542,30 @@ struct idw_hsw_hw_sim {
     uint64_t ggtt_bytes;
     uint32_t fail_mask;
     uint32_t fail_once;
+    uint32_t fail_engine;
     uint32_t engines;
+    uint32_t trace_count;
+    uint32_t trace_overflow;
+    struct idw_hsw_hw_sim_event trace[IDW_HSW_HW_SIM_TRACE_MAX];
     struct idw_hsw_hw_sim_stats stats;
 };
+
+static void sim_trace(struct idw_hsw_hw_sim *sim, uint32_t type,
+                      uint32_t engine, uint64_t offset, uint32_t value)
+{
+    struct idw_hsw_hw_sim_event *event;
+
+    if (sim->trace_count == IDW_HSW_HW_SIM_TRACE_MAX) {
+        sim->trace_overflow = 1;
+        return;
+    }
+    event = &sim->trace[sim->trace_count++];
+    event->type = type;
+    event->engine = engine;
+    event->offset = offset;
+    event->value = value;
+    event->reserved = 0;
+}
 
 static bool sim_fail(struct idw_hsw_hw_sim *sim, uint32_t flag)
 {
@@ -508,6 +584,7 @@ static int sim_read32(void *context, uint32_t offset, uint32_t *value)
 
     if (!value || (offset & 3u) || offset > IDW_HSW_SIM_REG_BYTES - 4u)
         return -EINVAL;
+    sim_trace(sim, IDW_HSW_HW_SIM_EVENT_READ, 0, offset, 0);
     if (sim_fail(sim, IDW_HSW_HW_SIM_FAIL_READ))
         return -EIO;
     *value = sim->registers[offset / 4u];
@@ -540,6 +617,7 @@ static int sim_write32(void *context, uint32_t offset, uint32_t value)
 
     if ((offset & 3u) || offset > IDW_HSW_SIM_REG_BYTES - 4u)
         return -EINVAL;
+    sim_trace(sim, IDW_HSW_HW_SIM_EVENT_WRITE, 0, offset, value);
     if (sim_fail(sim, IDW_HSW_HW_SIM_FAIL_WRITE))
         return -EIO;
     sim_store_reg(sim, offset, value);
@@ -553,6 +631,7 @@ static int sim_gtt_read32(void *context, uint64_t offset, uint32_t *value)
 
     if (!value || (offset & 3u) || offset > sim->ggtt_bytes - 4u)
         return -EINVAL;
+    sim_trace(sim, IDW_HSW_HW_SIM_EVENT_GTT_READ, 0, offset, 0);
     if (sim_fail(sim, IDW_HSW_HW_SIM_FAIL_GTT_READ))
         return -EIO;
     *value = sim->gtt[offset / 4u];
@@ -566,6 +645,7 @@ static int sim_gtt_write32(void *context, uint64_t offset, uint32_t value)
 
     if ((offset & 3u) || offset > sim->ggtt_bytes - 4u)
         return -EINVAL;
+    sim_trace(sim, IDW_HSW_HW_SIM_EVENT_GTT_WRITE, 0, offset, value);
     if (sim_fail(sim, IDW_HSW_HW_SIM_FAIL_GTT_WRITE))
         return -EIO;
     sim->gtt[offset / 4u] = value;
@@ -577,6 +657,7 @@ static int sim_gtt_flush(void *context)
 {
     struct idw_hsw_hw_sim *sim = context;
 
+    sim_trace(sim, IDW_HSW_HW_SIM_EVENT_GTT_FLUSH, 0, 0, 0);
     if (sim_fail(sim, IDW_HSW_HW_SIM_FAIL_FLUSH))
         return -EIO;
     ++sim->stats.flushes;
@@ -589,6 +670,7 @@ static int sim_invalidate_tlb(void *context, uint32_t engine_mask)
 
     if (!engine_mask_valid(engine_mask))
         return -EINVAL;
+    sim_trace(sim, IDW_HSW_HW_SIM_EVENT_INVALIDATE, engine_mask, 0, 0);
     if (sim_fail(sim, IDW_HSW_HW_SIM_FAIL_INVALIDATE))
         return -EIO;
     ++sim->stats.invalidations;
@@ -602,8 +684,24 @@ static int sim_set_engine_ppgtt(void *context, uint32_t engine, bool enable)
     if (!engine || (engine & (engine - 1)) ||
         (engine & ~IDW_HSW_ENGINE_ALL))
         return -EINVAL;
+    sim_trace(sim, IDW_HSW_HW_SIM_EVENT_ENGINE, engine, 0,
+              enable ? 1u : 0u);
+    if (sim->fail_engine == engine) {
+        sim->fail_engine = 0;
+        return -EIO;
+    }
     if (sim_fail(sim, IDW_HSW_HW_SIM_FAIL_ENGINE))
         return -EIO;
+    {
+        uint32_t offset = engine_reg(engine, IDW_HSW_RING_MODE_GEN7(0));
+        uint32_t value = sim->registers[offset / 4u];
+
+        if (enable)
+            value |= IDW_HSW_RING_MODE_PPGTT_ENABLE;
+        else
+            value &= ~IDW_HSW_RING_MODE_PPGTT_ENABLE;
+        sim_store_reg(sim, offset, value);
+    }
     if (enable)
         sim->engines |= engine;
     else
@@ -618,6 +716,7 @@ static int sim_posting_read(void *context, uint32_t offset, uint32_t *value)
 
     if (!value || (offset & 3u) || offset > IDW_HSW_SIM_REG_BYTES - 4u)
         return -EINVAL;
+    sim_trace(sim, IDW_HSW_HW_SIM_EVENT_POSTING_READ, 0, offset, 0);
     if (sim_fail(sim, IDW_HSW_HW_SIM_FAIL_POSTING_READ))
         return -EIO;
     *value = sim->registers[offset / 4u];
@@ -765,7 +864,11 @@ int idw_hsw_hw_sim_reset(struct idw_hsw_hw *hw)
     memset(sim->gtt, 0, (size_t)sim->ggtt_bytes);
     sim->fail_mask = 0;
     sim->fail_once = 0;
+    sim->fail_engine = 0;
     sim->engines = 0;
+    sim->trace_count = 0;
+    sim->trace_overflow = 0;
+    memset(sim->trace, 0, sizeof(sim->trace));
     memset(&sim->stats, 0, sizeof(sim->stats));
     hw->active = false;
     hw->active_engines = 0;
@@ -797,4 +900,63 @@ uint32_t idw_hsw_hw_sim_engine_mask(const struct idw_hsw_hw *hw)
         return 0;
     sim = hw->context;
     return sim ? sim->engines : 0;
+}
+
+int idw_hsw_hw_sim_fail_engine(struct idw_hsw_hw *hw, uint32_t engine)
+{
+    struct idw_hsw_hw_sim *sim = sim_from_hw(hw);
+
+    if (!sim || !engine || (engine & (engine - 1)) ||
+        (engine & ~IDW_HSW_ENGINE_ALL))
+        return -EINVAL;
+    sim->fail_engine = engine;
+    return 0;
+}
+
+int idw_hsw_hw_sim_trace_reset(struct idw_hsw_hw *hw)
+{
+    struct idw_hsw_hw_sim *sim = sim_from_hw(hw);
+
+    if (!sim)
+        return -EINVAL;
+    sim->trace_count = 0;
+    sim->trace_overflow = 0;
+    memset(sim->trace, 0, sizeof(sim->trace));
+    return 0;
+}
+
+uint32_t idw_hsw_hw_sim_trace_count(const struct idw_hsw_hw *hw)
+{
+    struct idw_hsw_hw_sim *sim;
+
+    if (!hw || !(hw->flags & IDW_HSW_HW_SIMULATED))
+        return 0;
+    sim = hw->context;
+    return sim ? sim->trace_count : 0;
+}
+
+int idw_hsw_hw_sim_trace_get(const struct idw_hsw_hw *hw, uint32_t index,
+                             struct idw_hsw_hw_sim_event *event)
+{
+    struct idw_hsw_hw_sim *sim;
+
+    if (!hw || !event || !(hw->flags & IDW_HSW_HW_SIMULATED))
+        return -EINVAL;
+    sim = hw->context;
+    if (!sim || index >= sim->trace_count)
+        return -EINVAL;
+    *event = sim->trace[index];
+    return 0;
+}
+
+int idw_hsw_hw_sim_trace_overflowed(const struct idw_hsw_hw *hw)
+{
+    struct idw_hsw_hw_sim *sim;
+
+    if (!hw || !(hw->flags & IDW_HSW_HW_SIMULATED))
+        return -EINVAL;
+    sim = hw->context;
+    if (!sim)
+        return -EINVAL;
+    return sim->trace_overflow ? 1 : 0;
 }

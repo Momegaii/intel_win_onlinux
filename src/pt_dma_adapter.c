@@ -19,8 +19,7 @@ static int validate_page(const struct idw_pt_dma_adapter *adapter,
     if (!adapter || !adapter->active)
         return -ENODEV;
     if (!page || page->size != sizeof(*page) || !page->cpu_address ||
-        page->bytes < IDW_PT_PAGE_BYTES ||
-        (page->bytes & (IDW_PT_PAGE_BYTES - 1)) ||
+        page->bytes != IDW_PT_PAGE_BYTES ||
         !page->allocation_cookie ||
         (page->memory_type != IDW_PT_PAGE_COHERENT &&
          page->memory_type != IDW_PT_PAGE_STREAMING))
@@ -228,6 +227,7 @@ int idw_pt_dma_adapter_page_ops(struct idw_pt_dma_adapter *adapter,
         .scope = adapter->scope,
         .alloc_page_table_page = alloc_page_callback,
         .free_page_table_page = free_page_callback,
+        .sync_page_table_for_device = sync_page_for_device,
         .context = adapter
     };
     return 0;

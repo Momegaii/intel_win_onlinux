@@ -2,6 +2,41 @@
 
 Date: 2026-11-20
 
+## Stage 3B design closure and physical readiness audit
+
+Completed the Stage 3B software/design closure without unbinding i915, binding
+IDW, mapping a BAR, or touching physical MMIO. Added
+`docs/design/HASWELL_GEN75_STAGE3B_PHYSICAL_READINESS_MATRIX.md` and updated the
+Stage 3B plan, Stage 3A readiness, and physical PPGTT readiness documents.
+
+Audit fixes:
+
+- Activation now snapshots the programmed `PP_DIR_BASE`; `PP_DIR_BASE_READ` is
+  diagnostic only. A test creates divergent values to prove the choice.
+- `RING_MODE_GEN7` is saved and restored, activation rejects a selected engine
+  that already has PPGTT enabled, and enable/disable is verified by readback.
+- A failed activation rollback now poisons the abstraction, marks the device
+  conservatively active, and blocks destroy until reset.
+- The PPGTT page-op contract requires `sync_page_table_for_device`; the model
+  calls it after zeroing, PTE publication, and PTE clearing. A sync failure
+  poisons the model.
+- Device lifecycle rollback fails closed when a completed stage has no teardown
+  callback.
+- The DMA adapter now requires exactly one 4 KiB page per page-table page.
+- The simulator records exact callback order and supports a per-callback
+  failure matrix. Tests cover render/video/blitter selection, partial
+  activation, rollback, deactivation, reset, poison, and recovery.
+
+Remaining critical blockers are exclusive PCI ownership, PPGTT cache-policy
+programming, and `PP_DIR_BASE` load-completion ordering. Decision: NO-GO for
+independent hardware initialization. No physical GPU operation was performed.
+
+Validation: `make stage3a-test`, `make ppgtt-model-test`,
+`make pt-dma-adapter-test`, and `make stage3a-sanitize-test` passed, including
+ASan/UBSan with leak detection. `make test` passed every software target and
+stopped only at `tests/smoke.sh` because this environment has no Intel DRM
+render node. `make kernel CC=gcc W=1` passed. i915 remains bound.
+
 ## Requested development sequence
 
 The project roadmap now states the requested order:
