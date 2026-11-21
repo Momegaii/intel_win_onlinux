@@ -9,6 +9,7 @@
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/iopoll.h>
+#include <linux/kref.h>
 #include <linux/miscdevice.h>
 #include <linux/mm.h>
 #include <linux/module.h>
@@ -17,6 +18,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
+#include <linux/workqueue.h>
 #include <asm/io.h>
 #include "../include/idw/dma_memory.h"
 #include "../include/idw/haswell_ppgtt_model.h"
@@ -37,24 +39,65 @@
 #define IDW_QEMU_EXIT_FAIL 0x11
 #define IDW_EDU_DMA_CYCLES 32
 
+enum idw_edu_owner_state {
+	IDW_EDU_OWNER_INITIALIZING,
+	IDW_EDU_OWNER_ACTIVE,
+	IDW_EDU_OWNER_CLEANUP_PENDING,
+	IDW_EDU_OWNER_QUARANTINED,
+	IDW_EDU_OWNER_RECOVERING,
+	IDW_EDU_OWNER_RELEASED,
+};
+
 struct idw_edu_test {
 	struct device *dev;
+	struct pci_dev *pdev;
 	void __iomem *bar;
 	struct idw_dma_provider provider;
 	struct idw_dma_pt_adapter pt_adapter;
 	struct miscdevice misc;
 	struct completion closed;
 	struct mutex ops_lock;
+	struct mutex lifecycle_lock;
 	atomic_t open;
+	struct kref refs;
+	struct list_head registry_link;
+	u64 owner_id;
+	enum idw_edu_owner_state state;
+	bool registered;
+	bool module_ref;
 	bool provider_ready;
 	bool pt_adapter_ready;
 	bool misc_ready;
+	bool pci_enabled;
+	bool pci_regions;
+	bool pci_master;
+	bool bar_mapped;
+	bool adapter_cleanup_done;
+	bool provider_cleanup_done;
+	bool pci_cleanup_done;
+	struct idw_dma_page_info probe_test_page;
+	bool probe_test_page_valid;
+	int cleanup_error;
 };
+
+#define IDW_EDU_MAX_OWNERS 8
 
 static struct idw_edu_test *idw_edu_active;
 static int idw_edu_test_result = -EINPROGRESS;
 static int idw_edu_remove_result = -EINPROGRESS;
+static LIST_HEAD(idw_edu_owners);
+static DEFINE_MUTEX(idw_edu_registry_lock);
+static unsigned int idw_edu_owner_count;
+static unsigned int idw_edu_owner_state_snapshot;
+static atomic64_t idw_edu_next_owner_id = ATOMIC64_INIT(0);
+static struct workqueue_struct *idw_edu_cleanup_wq;
+static struct delayed_work idw_edu_cleanup_work;
+static bool idw_edu_probe_failure_test;
+
 module_param_named(test_result, idw_edu_test_result, int, 0444);
+module_param_named(probe_failure_test, idw_edu_probe_failure_test, bool, 0444);
+module_param_named(owner_count, idw_edu_owner_count, uint, 0444);
+module_param_named(owner_state, idw_edu_owner_state_snapshot, uint, 0444);
 
 static int idw_edu_provider_fini_checked(struct idw_edu_test *test)
 {
@@ -66,6 +109,303 @@ static int idw_edu_provider_fini_checked(struct idw_edu_test *test)
         if (!ret)
                 test->provider_ready = false;
         return ret;
+}
+
+static int idw_edu_owner_cleanup(struct idw_edu_test *test);
+static void idw_edu_registry_retry(void);
+static void idw_edu_schedule_cleanup(void);
+
+static const char *idw_edu_owner_state_name(enum idw_edu_owner_state state)
+{
+        switch (state) {
+        case IDW_EDU_OWNER_INITIALIZING:
+                return "INITIALIZING";
+        case IDW_EDU_OWNER_ACTIVE:
+                return "ACTIVE";
+        case IDW_EDU_OWNER_CLEANUP_PENDING:
+                return "CLEANUP_PENDING";
+        case IDW_EDU_OWNER_QUARANTINED:
+                return "QUARANTINED";
+        case IDW_EDU_OWNER_RECOVERING:
+                return "RECOVERING";
+        case IDW_EDU_OWNER_RELEASED:
+                return "RELEASED";
+        default:
+                return "UNKNOWN";
+        }
+}
+
+static void idw_edu_update_observability_locked(void)
+{
+        struct idw_edu_test *first;
+
+        idw_edu_owner_state_snapshot = 0;
+        if (list_empty(&idw_edu_owners))
+                return;
+        first = list_first_entry(&idw_edu_owners, struct idw_edu_test,
+                                 registry_link);
+        idw_edu_owner_state_snapshot = first->state;
+}
+
+static void idw_edu_owner_release(struct kref *ref)
+{
+        struct idw_edu_test *test = container_of(ref, struct idw_edu_test,
+                                                 refs);
+
+        if (test->module_ref) {
+                test->module_ref = false;
+                module_put(THIS_MODULE);
+        }
+        kfree(test);
+}
+
+static void idw_edu_owner_get(struct idw_edu_test *test)
+{
+        kref_get(&test->refs);
+}
+
+static void idw_edu_owner_put(struct idw_edu_test *test)
+{
+        if (test)
+                kref_put(&test->refs, idw_edu_owner_release);
+}
+
+static void idw_edu_pci_cleanup(struct idw_edu_test *test)
+{
+        if (!test || !test->pdev)
+                return;
+        pr_info("IDW_QEMU_DMA: owner %llu PCI cleanup begin enabled=%d regions=%d master=%d bar=%d\n",
+                (unsigned long long)test->owner_id, test->pci_enabled,
+                test->pci_regions, test->pci_master, test->bar_mapped);
+        if (test->pci_master) {
+                pci_clear_master(test->pdev);
+                test->pci_master = false;
+        }
+        if (test->bar_mapped) {
+                pci_iounmap(test->pdev, test->bar);
+                test->bar = NULL;
+                test->bar_mapped = false;
+        }
+        if (test->pci_regions) {
+                pci_release_regions(test->pdev);
+                test->pci_regions = false;
+        }
+        if (test->pci_enabled) {
+                pci_disable_device(test->pdev);
+                test->pci_enabled = false;
+        }
+        pci_set_drvdata(test->pdev, NULL);
+        test->pci_cleanup_done = true;
+        pr_info("IDW_QEMU_DMA: owner %llu PCI cleanup complete enabled=%d regions=%d master=%d bar=%d\n",
+                (unsigned long long)test->owner_id, test->pci_enabled,
+                test->pci_regions, test->pci_master, test->bar_mapped);
+}
+
+static bool idw_edu_registry_capacity(void)
+{
+        bool available;
+
+        mutex_lock(&idw_edu_registry_lock);
+        available = idw_edu_owner_count < IDW_EDU_MAX_OWNERS;
+        mutex_unlock(&idw_edu_registry_lock);
+        return available;
+}
+
+static int idw_edu_registry_add(struct idw_edu_test *test)
+{
+        if (!test)
+                return -EINVAL;
+        if (test->registered)
+                return 0;
+        if (!try_module_get(THIS_MODULE))
+                return -ENODEV;
+
+        mutex_lock(&idw_edu_registry_lock);
+        if (idw_edu_owner_count >= IDW_EDU_MAX_OWNERS) {
+                mutex_unlock(&idw_edu_registry_lock);
+                module_put(THIS_MODULE);
+                return -ENOSPC;
+        }
+        idw_edu_owner_get(test);
+        test->registered = true;
+        test->module_ref = true;
+        test->owner_id = atomic64_inc_return(&idw_edu_next_owner_id);
+        test->state = IDW_EDU_OWNER_QUARANTINED;
+        list_add_tail(&test->registry_link, &idw_edu_owners);
+        idw_edu_owner_count++;
+        idw_edu_update_observability_locked();
+        mutex_unlock(&idw_edu_registry_lock);
+        idw_edu_schedule_cleanup();
+        return 0;
+}
+
+static void idw_edu_registry_remove(struct idw_edu_test *test)
+{
+        bool found = false;
+
+        if (!test)
+                return;
+        mutex_lock(&idw_edu_registry_lock);
+        if (test->registered) {
+                list_del(&test->registry_link);
+                test->registered = false;
+                if (idw_edu_owner_count)
+                        idw_edu_owner_count--;
+                idw_edu_update_observability_locked();
+                found = true;
+        }
+        mutex_unlock(&idw_edu_registry_lock);
+        if (found)
+                idw_edu_owner_put(test);
+}
+
+static bool idw_edu_registry_contains(struct idw_edu_test *test)
+{
+        struct idw_edu_test *entry;
+        bool found = false;
+
+        mutex_lock(&idw_edu_registry_lock);
+        list_for_each_entry(entry, &idw_edu_owners, registry_link) {
+                if (entry == test) {
+                        found = true;
+                        break;
+                }
+        }
+        mutex_unlock(&idw_edu_registry_lock);
+        return found;
+}
+
+static int idw_edu_owner_cleanup(struct idw_edu_test *test)
+{
+        int ret;
+
+        if (!test)
+                return -EINVAL;
+
+        mutex_lock(&test->lifecycle_lock);
+        if (test->state == IDW_EDU_OWNER_RELEASED) {
+                mutex_unlock(&test->lifecycle_lock);
+                idw_edu_registry_remove(test);
+                return 0;
+        }
+        if (test->state == IDW_EDU_OWNER_QUARANTINED) {
+                test->state = IDW_EDU_OWNER_RECOVERING;
+                pr_info("IDW_QEMU_DMA: owner %llu recovering from quarantine\n",
+                        (unsigned long long)test->owner_id);
+        }
+        test->state = IDW_EDU_OWNER_CLEANUP_PENDING;
+        test->cleanup_error = 0;
+
+        if (test->misc_ready) {
+                misc_deregister(&test->misc);
+                WRITE_ONCE(idw_edu_active, NULL);
+                if (atomic_read(&test->open))
+                        wait_for_completion(&test->closed);
+                test->misc_ready = false;
+        }
+
+        if (test->pt_adapter_ready && !test->adapter_cleanup_done) {
+                ret = idw_dma_pt_adapter_fini(&test->pt_adapter);
+                if (ret) {
+                        test->cleanup_error = ret;
+                        test->state = IDW_EDU_OWNER_QUARANTINED;
+                        pr_err("IDW_QEMU_DMA: owner %llu adapter cleanup blocked: %d\n",
+                               (unsigned long long)test->owner_id, ret);
+                        mutex_unlock(&test->lifecycle_lock);
+                        idw_edu_schedule_cleanup();
+                        return ret;
+                }
+                test->pt_adapter_ready = false;
+                test->adapter_cleanup_done = true;
+        }
+
+        if (test->provider_ready && !test->provider_cleanup_done) {
+                ret = idw_edu_provider_fini_checked(test);
+                if (ret) {
+                        test->cleanup_error = ret;
+                        test->state = IDW_EDU_OWNER_QUARANTINED;
+                        pr_err("IDW_QEMU_DMA: owner %llu provider cleanup blocked: %d pci_enabled=%d regions=%d master=%d bar=%d\n",
+                               (unsigned long long)test->owner_id, ret,
+                               test->pci_enabled, test->pci_regions,
+                               test->pci_master, test->bar_mapped);
+                        mutex_unlock(&test->lifecycle_lock);
+                        idw_edu_schedule_cleanup();
+                        return ret;
+                }
+                test->provider_cleanup_done = true;
+        }
+
+        idw_edu_pci_cleanup(test);
+        test->state = IDW_EDU_OWNER_RELEASED;
+        pr_info("IDW_QEMU_DMA: owner %llu released state=RELEASED\n",
+                (unsigned long long)test->owner_id);
+        mutex_unlock(&test->lifecycle_lock);
+        idw_edu_registry_remove(test);
+        return 0;
+}
+
+static void idw_edu_registry_retry(void)
+{
+        struct idw_edu_test *snapshot[IDW_EDU_MAX_OWNERS];
+        struct idw_edu_test *entry;
+        unsigned int count = 0;
+        unsigned int i;
+
+        mutex_lock(&idw_edu_registry_lock);
+        list_for_each_entry(entry, &idw_edu_owners, registry_link) {
+                if (count >= IDW_EDU_MAX_OWNERS)
+                        break;
+                if (entry->state != IDW_EDU_OWNER_QUARANTINED &&
+                    entry->state != IDW_EDU_OWNER_CLEANUP_PENDING)
+                        continue;
+                idw_edu_owner_get(entry);
+                snapshot[count++] = entry;
+        }
+        mutex_unlock(&idw_edu_registry_lock);
+
+        for (i = 0; i < count; i++) {
+                if (snapshot[i]->probe_test_page_valid) {
+                        int page_ret = idw_dma_page_free(&snapshot[i]->provider,
+                                                         &snapshot[i]->probe_test_page);
+
+                        if (!page_ret) {
+                                snapshot[i]->probe_test_page_valid = false;
+                                memset(&snapshot[i]->probe_test_page, 0,
+                                       sizeof(snapshot[i]->probe_test_page));
+                                pr_info("IDW_QEMU_DMA: owner %llu released probe-failure test page\n",
+                                        (unsigned long long)snapshot[i]->owner_id);
+                        } else {
+                                pr_err("IDW_QEMU_DMA: owner %llu test page release failed: %d\n",
+                                       (unsigned long long)snapshot[i]->owner_id,
+                                       page_ret);
+                        }
+                }
+                idw_edu_owner_cleanup(snapshot[i]);
+                idw_edu_owner_put(snapshot[i]);
+        }
+}
+
+static void idw_edu_cleanup_work_fn(struct work_struct *work)
+{
+        bool pending;
+
+        if (!try_module_get(THIS_MODULE))
+                return;
+        idw_edu_registry_retry();
+        mutex_lock(&idw_edu_registry_lock);
+        pending = idw_edu_owner_count != 0;
+        mutex_unlock(&idw_edu_registry_lock);
+        if (pending && idw_edu_cleanup_wq)
+                queue_delayed_work(idw_edu_cleanup_wq, &idw_edu_cleanup_work,
+                                   HZ);
+        module_put(THIS_MODULE);
+}
+
+static void idw_edu_schedule_cleanup(void)
+{
+        if (idw_edu_cleanup_wq)
+                queue_delayed_work(idw_edu_cleanup_wq, &idw_edu_cleanup_work,
+                                   HZ);
 }
 
 static int idw_edu_dma_wait(struct idw_edu_test *test)
@@ -1234,197 +1574,349 @@ static const struct file_operations idw_edu_fops = {
 };
 
 
-static int idw_edu_probe(struct pci_dev *pdev,
-			 const struct pci_device_id *id)
+static int idw_edu_test_owner_lifecycle(struct idw_edu_test *test)
 {
-	struct idw_edu_test *test;
-	struct idw_dma_provider rejected = {};
-	struct idw_dma_provider low_mask = {};
-	int ret;
-	bool owner_retained = false;
+        struct idw_edu_test *owner;
+        struct idw_dma_resource *resource;
+        struct idw_hsw_ppgtt_page_ops page_ops;
+        struct idw_dma_page page = {};
+        int ret;
 
-	(void)id;
-	test = kzalloc(sizeof(*test), GFP_KERNEL);
-	if (!test)
-		return -ENOMEM;
-	test->dev = &pdev->dev;
-	ret = pci_enable_device_mem(pdev);
-	if (ret)
-		goto fail_state;
-	ret = pci_request_regions(pdev, "idw-edu-dma-test");
-	if (ret)
-		goto fail_disable;
-	test->bar = pci_iomap(pdev, IDW_EDU_BAR, 0);
-	if (!test->bar) {
-		ret = -ENOMEM;
-		goto fail_regions;
-	}
+        owner = kzalloc(sizeof(*owner), GFP_KERNEL);
+        if (!owner)
+                return -ENOMEM;
+        resource = kzalloc(sizeof(*resource), GFP_KERNEL);
+        if (!resource) {
+                kfree(owner);
+                return -ENOMEM;
+        }
 
-	ret = idw_dma_provider_init(&rejected, &pdev->dev, NULL, 1);
-	if (ret != -EPERM) {
-		ret = -EINVAL;
-		goto fail_iomap;
-	}
-	pr_info("IDW_QEMU_DMA: rejected provider owner mismatch\n");
+        owner->dev = test->dev;
+        kref_init(&owner->refs);
+        mutex_init(&owner->lifecycle_lock);
+        owner->state = IDW_EDU_OWNER_INITIALIZING;
 
-	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
-	if (ret)
-		goto fail_iomap;
-	ret = idw_dma_provider_init(&low_mask, &pdev->dev, THIS_MODULE, 2);
-	if (ret != -EIO) {
-		if (!ret)
-			idw_dma_provider_fini(&low_mask);
-		ret = -EINVAL;
-		goto fail_iomap;
-	}
-	ret = dma_set_mask(&pdev->dev, IDW_DMA_RESOURCE_ADDRESS_MASK);
-	if (ret)
-		goto fail_iomap;
-	ret = dma_set_coherent_mask(&pdev->dev, IDW_DMA_ADDRESS_MASK);
-	if (ret)
-		goto fail_iomap;
-	pr_info("IDW_QEMU_DMA: rejected 32-bit mask; accepted 39-bit streaming and 40-bit coherent masks\n");
+        ret = idw_dma_provider_init(&owner->provider, owner->dev, THIS_MODULE, 3);
+        if (ret)
+                goto free_owner;
+        owner->provider_ready = true;
 
-	pci_set_master(pdev);
-	ret = idw_dma_provider_init(&test->provider, &pdev->dev,
-				    THIS_MODULE, 1);
-	if (ret)
-		goto fail_master;
-	test->provider_ready = true;
+        ret = idw_edu_registry_add(owner);
+        if (ret)
+                goto free_provider;
 
-	ret = idw_edu_test_pt_storage(test);
-	if (ret)
-		goto fail_provider;
+        ret = idw_dma_pt_adapter_init(&owner->pt_adapter, &owner->provider);
+        if (ret)
+                goto free_provider;
+        owner->pt_adapter_ready = true;
+        ret = idw_dma_pt_adapter_page_ops(&owner->pt_adapter, &page_ops);
+        if (ret)
+                goto free_adapter;
+        page.size = sizeof(page);
+        ret = page_ops.alloc_page_table_page(page_ops.context, &page);
+        if (ret)
+                goto free_adapter;
 
-	ret = idw_edu_test_dma_cycles(test);
-	if (ret)
-		goto fail_provider;
+        ret = idw_dma_resource_alloc(&owner->provider, PAGE_SIZE,
+                                     DMA_BIDIRECTIONAL, resource);
+        if (ret)
+                goto free_page;
 
-	ret = idw_edu_test_resource_backing(test);
-	if (ret)
-		goto fail_provider;
-	ret = idw_edu_test_provider_removal(test);
-	if (ret)
-		goto fail_provider;
+        ret = idw_edu_owner_cleanup(owner);
+        if (ret != -EBUSY || owner->state != IDW_EDU_OWNER_QUARANTINED ||
+            !owner->registered) {
+                ret = -EIO;
+                goto free_resource;
+        }
+        if (!idw_edu_registry_contains(owner) || idw_edu_owner_count != 1) {
+                ret = -EIO;
+                goto free_resource;
+        }
+        pr_info("IDW_QEMU_DMA: owner %llu quarantined adapter refs state=%s count=%u\n",
+                (unsigned long long)owner->owner_id,
+                idw_edu_owner_state_name(owner->state), idw_edu_owner_count);
 
-	test->misc.minor = MISC_DYNAMIC_MINOR;
-	test->misc.name = "idw-edu-dma";
-	test->misc.fops = &idw_edu_fops;
-	test->misc.parent = &pdev->dev;
-	test->misc.mode = 0600;
-	init_completion(&test->closed);
-	mutex_init(&test->ops_lock);
-	atomic_set(&test->open, 0);
-	ret = misc_register(&test->misc);
-	if (ret)
-		goto fail_provider;
-	test->misc_ready = true;
-	WRITE_ONCE(idw_edu_active, test);
+        ret = idw_dma_pt_adapter_release_page(&owner->pt_adapter, &page);
+        if (ret)
+                goto free_resource;
+        memset(&page, 0, sizeof(page));
 
-	pci_set_drvdata(pdev, test);
-	idw_edu_remove_result = -EINPROGRESS;
-	idw_edu_test_result = 0;
-	pr_info("IDW_QEMU_DMA: probe passed; no outstanding provider pages retained\n");
-	return 0;
+        ret = idw_edu_owner_cleanup(owner);
+        if (ret != -EBUSY || owner->state != IDW_EDU_OWNER_QUARANTINED ||
+            !owner->registered || !owner->adapter_cleanup_done) {
+                ret = -EIO;
+                goto free_resource;
+        }
+        pr_info("IDW_QEMU_DMA: owner %llu adapter recovered, provider still blocked state=%s count=%u\n",
+                (unsigned long long)owner->owner_id,
+                idw_edu_owner_state_name(owner->state), idw_edu_owner_count);
+
+        ret = idw_dma_resource_free(&owner->provider, resource);
+        if (ret)
+                goto free_resource;
+
+        ret = idw_edu_owner_cleanup(owner);
+        if (ret || owner->state != IDW_EDU_OWNER_RELEASED ||
+            owner->registered || idw_edu_owner_count != 0 ||
+            owner->provider.active) {
+                ret = -EIO;
+                goto free_resource;
+        }
+        pr_info("IDW_QEMU_DMA: owner %llu released after all dependencies drained\n",
+                (unsigned long long)owner->owner_id);
+
+        kfree(resource);
+        idw_edu_owner_put(owner);
+        return 0;
+
+free_resource:
+        if (resource)
+                (void)idw_dma_resource_free(&owner->provider, resource);
+free_page:
+        if (page.cpu_address)
+                (void)idw_dma_pt_adapter_release_page(&owner->pt_adapter, &page);
+free_adapter:
+        if (owner->pt_adapter_ready)
+                (void)idw_dma_pt_adapter_fini(&owner->pt_adapter);
+free_provider:
+        if (owner->provider_ready) {
+                int cleanup_ret = idw_dma_provider_fini(&owner->provider);
+
+                if (cleanup_ret) {
+                        pr_err("IDW_QEMU_DMA: lifecycle test provider cleanup blocked: %d\n",
+                               cleanup_ret);
+                        if (owner->registered)
+                                idw_edu_owner_put(owner);
+                        else
+                                pr_err("IDW_QEMU_DMA: lifecycle test owner is unregistered\n");
+                        return ret;
+                }
+                owner->provider_ready = false;
+        }
+        if (owner->registered)
+                idw_edu_registry_remove(owner);
+        kfree(resource);
+free_owner:
+        idw_edu_owner_put(owner);
+        return ret;
+}
+
+static int idw_edu_probe(struct pci_dev *pdev,
+                         const struct pci_device_id *id)
+{
+        struct idw_edu_test *test;
+        struct idw_dma_provider rejected = {};
+        struct idw_dma_provider low_mask = {};
+        int ret;
+        bool owner_retained = false;
+
+        (void)id;
+        if (!idw_edu_registry_capacity())
+                return -EBUSY;
+        test = kzalloc(sizeof(*test), GFP_KERNEL);
+        if (!test)
+                return -ENOMEM;
+        test->dev = &pdev->dev;
+        test->pdev = pdev;
+        kref_init(&test->refs);
+        mutex_init(&test->lifecycle_lock);
+        test->state = IDW_EDU_OWNER_INITIALIZING;
+
+        ret = pci_enable_device_mem(pdev);
+        if (ret)
+                goto fail_state;
+        test->pci_enabled = true;
+        ret = pci_request_regions(pdev, "idw-edu-dma-test");
+        if (ret)
+                goto fail_disable;
+        test->pci_regions = true;
+        test->bar = pci_iomap(pdev, IDW_EDU_BAR, 0);
+        if (!test->bar) {
+                ret = -ENOMEM;
+                goto fail_regions;
+        }
+        test->bar_mapped = true;
+
+        ret = idw_dma_provider_init(&rejected, &pdev->dev, NULL, 1);
+        if (ret != -EPERM) {
+                ret = -EINVAL;
+                goto fail_iomap;
+        }
+        pr_info("IDW_QEMU_DMA: rejected provider owner mismatch\n");
+
+        ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
+        if (ret)
+                goto fail_iomap;
+        ret = idw_dma_provider_init(&low_mask, &pdev->dev, THIS_MODULE, 2);
+        if (ret != -EIO) {
+                if (!ret)
+                        idw_dma_provider_fini(&low_mask);
+                ret = -EINVAL;
+                goto fail_iomap;
+        }
+        ret = dma_set_mask(&pdev->dev, IDW_DMA_RESOURCE_ADDRESS_MASK);
+        if (ret)
+                goto fail_iomap;
+        ret = dma_set_coherent_mask(&pdev->dev, IDW_DMA_ADDRESS_MASK);
+        if (ret)
+                goto fail_iomap;
+        pr_info("IDW_QEMU_DMA: rejected 32-bit mask; accepted 39-bit streaming and 40-bit coherent masks\n");
+
+        pci_set_master(pdev);
+        test->pci_master = true;
+        ret = idw_dma_provider_init(&test->provider, &pdev->dev,
+                                    THIS_MODULE, 1);
+        if (ret)
+                goto fail_master;
+        test->provider_ready = true;
+
+        if (idw_edu_probe_failure_test) {
+                ret = idw_dma_page_alloc(&test->provider,
+                                         &test->probe_test_page);
+                if (!ret)
+                        test->probe_test_page_valid = true;
+                else
+                        goto fail_provider;
+                ret = -EIO;
+                goto fail_provider;
+        }
+
+        ret = idw_edu_test_pt_storage(test);
+        if (ret)
+                goto fail_provider;
+
+        ret = idw_edu_test_dma_cycles(test);
+        if (ret)
+                goto fail_provider;
+
+        ret = idw_edu_test_resource_backing(test);
+        if (ret)
+                goto fail_provider;
+        ret = idw_edu_test_provider_removal(test);
+        if (ret)
+                goto fail_provider;
+        ret = idw_edu_test_owner_lifecycle(test);
+        if (ret)
+                goto fail_provider;
+
+        test->misc.minor = MISC_DYNAMIC_MINOR;
+        test->misc.name = "idw-edu-dma";
+        test->misc.fops = &idw_edu_fops;
+        test->misc.parent = &pdev->dev;
+        test->misc.mode = 0600;
+        init_completion(&test->closed);
+        mutex_init(&test->ops_lock);
+        atomic_set(&test->open, 0);
+        ret = misc_register(&test->misc);
+        if (ret)
+                goto fail_provider;
+        test->misc_ready = true;
+        WRITE_ONCE(idw_edu_active, test);
+
+        pci_set_drvdata(pdev, test);
+        test->state = IDW_EDU_OWNER_ACTIVE;
+        idw_edu_remove_result = -EINPROGRESS;
+        idw_edu_test_result = 0;
+        pr_info("IDW_QEMU_DMA: probe passed; no outstanding provider pages retained\n");
+        return 0;
 
 fail_provider:
-	if (test->misc_ready) {
-		misc_deregister(&test->misc);
-		test->misc_ready = false;
-	}
-	if (test->pt_adapter_ready) {
-		int adapter_ret = idw_dma_pt_adapter_fini(&test->pt_adapter);
+        ret = idw_edu_owner_cleanup(test);
+        if (ret) {
+                int reg_ret = idw_edu_registry_add(test);
 
-		if (adapter_ret) {
-			owner_retained = true;
-			pr_err("IDW_QEMU_DMA: page-table adapter cleanup returned %d; retaining owner\n",
-			       adapter_ret);
-		}
-		test->pt_adapter_ready = false;
-	}
-	if (test->provider_ready) {
-		int provider_ret = idw_edu_provider_fini_checked(test);
+                owner_retained = true;
+                if (reg_ret)
+                        pr_err("IDW_QEMU_DMA: owner registration failed: %d; cleanup remains blocked\n",
+                               reg_ret);
+                else
+                        pr_err("IDW_QEMU_DMA: probe failure retained owner %llu state=%s count=%u\n",
+                               (unsigned long long)test->owner_id,
+                               idw_edu_owner_state_name(test->state),
+                               idw_edu_owner_count);
+        }
+        goto fail_state;
 
-		if (provider_ret) {
-			owner_retained = true;
-			pr_err("IDW_QEMU_DMA: provider finalization refused %d; retaining owner\n",
-			       provider_ret);
-		}
-	}
 fail_master:
-	pci_clear_master(pdev);
 fail_iomap:
-	if (test->bar)
-		pci_iounmap(pdev, test->bar);
 fail_regions:
-	pci_release_regions(pdev);
 fail_disable:
-	pci_disable_device(pdev);
+        idw_edu_pci_cleanup(test);
 fail_state:
-	if (owner_retained) {
-		pr_err("IDW_QEMU_DMA: probe failure retained owner; cleanup remains incomplete\n");
-		idw_edu_test_result = ret;
-		outb(IDW_QEMU_EXIT_FAIL, IDW_QEMU_DEBUG_EXIT_PORT);
-		return ret;
-	}
-	kfree(test);
-	idw_edu_test_result = ret;
-	pr_err("IDW_QEMU_DMA: probe test failed: %d\n", ret);
-	outb(IDW_QEMU_EXIT_FAIL, IDW_QEMU_DEBUG_EXIT_PORT);
-	return ret;
+        if (owner_retained) {
+                if (test->registered)
+                        idw_edu_owner_put(test);
+                else
+                        pr_err("IDW_QEMU_DMA: retained owner is unregistered; cleanup remains incomplete\n");
+                idw_edu_test_result = ret;
+                if (!idw_edu_probe_failure_test)
+                        outb(IDW_QEMU_EXIT_FAIL, IDW_QEMU_DEBUG_EXIT_PORT);
+                return ret;
+        }
+        idw_edu_owner_put(test);
+        idw_edu_test_result = ret;
+        pr_err("IDW_QEMU_DMA: probe test failed: %d\n", ret);
+        outb(IDW_QEMU_EXIT_FAIL, IDW_QEMU_DEBUG_EXIT_PORT);
+        return ret;
 }
 
 static void idw_edu_remove(struct pci_dev *pdev)
 {
-	struct idw_edu_test *test = pci_get_drvdata(pdev);
-	bool outstanding;
-	bool quarantined;
-	int adapter_ret = 0;
-	int ret;
+        struct idw_edu_test *test = pci_get_drvdata(pdev);
+        bool outstanding;
+        bool quarantined;
+        int adapter_ret = 0;
+        int ret = 0;
 
-	if (!test)
-		return;
-	if (test->misc_ready) {
-		misc_deregister(&test->misc);
-		WRITE_ONCE(idw_edu_active, NULL);
-		if (atomic_read(&test->open))
-			wait_for_completion(&test->closed);
-		test->misc_ready = false;
-	}
-	mutex_lock(&test->ops_lock);
-	if (test->pt_adapter_ready) {
-		adapter_ret = idw_dma_pt_adapter_fini(&test->pt_adapter);
-		test->pt_adapter_ready = false;
-	}
-	outstanding = !list_empty(&test->provider.pages) ||
-		      !list_empty(&test->provider.resources) ||
-		      atomic_read(&test->provider.vma_refs);
-	ret = idw_dma_provider_fini(&test->provider);
-	quarantined = adapter_ret || ret || outstanding;
-	if (quarantined) {
-		test->provider.removal_blocked = true;
-		test->provider_ready = false;
-		mutex_unlock(&test->ops_lock);
-		pci_clear_master(pdev);
-		pci_iounmap(pdev, test->bar);
-		pci_release_regions(pdev);
-		pci_disable_device(pdev);
-		pci_set_drvdata(pdev, NULL);
-		idw_edu_remove_result = -EBUSY;
-		pr_err("IDW_QEMU_DMA: remove quarantined outstanding resources adapter=%d provider=%d result=%d\n",
-		       adapter_ret, ret, idw_edu_remove_result);
-		return;
-	}
-	test->provider_ready = false;
-	mutex_unlock(&test->ops_lock);
-	pci_clear_master(pdev);
-	pci_iounmap(pdev, test->bar);
-	pci_release_regions(pdev);
-	pci_disable_device(pdev);
-	pci_set_drvdata(pdev, NULL);
-	kfree(test);
-	idw_edu_remove_result = 0;
-	pr_info("IDW_QEMU_DMA: remove released all provider resources result=0\n");
+        if (!test)
+                return;
+        if (test->misc_ready) {
+                misc_deregister(&test->misc);
+                WRITE_ONCE(idw_edu_active, NULL);
+                if (atomic_read(&test->open))
+                        wait_for_completion(&test->closed);
+                test->misc_ready = false;
+        }
+        mutex_lock(&test->ops_lock);
+        if (test->pt_adapter_ready) {
+                adapter_ret = idw_dma_pt_adapter_fini(&test->pt_adapter);
+                if (!adapter_ret)
+                        test->pt_adapter_ready = false;
+        }
+        outstanding = !list_empty(&test->provider.pages) ||
+                      !list_empty(&test->provider.resources) ||
+                      atomic_read(&test->provider.vma_refs);
+        if (test->provider_ready)
+                ret = idw_dma_provider_fini(&test->provider);
+        quarantined = adapter_ret || ret || outstanding;
+        if (quarantined) {
+                int reg_ret;
+
+                test->provider.removal_blocked = true;
+                test->state = IDW_EDU_OWNER_QUARANTINED;
+                mutex_unlock(&test->ops_lock);
+                pci_set_drvdata(pdev, NULL);
+                reg_ret = idw_edu_registry_add(test);
+                if (!reg_ret)
+                        idw_edu_owner_put(test);
+                else
+                        pr_err("IDW_QEMU_DMA: remove owner registration failed: %d; cleanup remains blocked\n",
+                               reg_ret);
+                idw_edu_remove_result = -EBUSY;
+                pr_err("IDW_QEMU_DMA: remove quarantined outstanding resources adapter=%d provider=%d result=%d owner_count=%u\n",
+                       adapter_ret, ret, idw_edu_remove_result,
+                       idw_edu_owner_count);
+                return;
+        }
+        test->provider_ready = false;
+        test->pt_adapter_ready = false;
+        test->state = IDW_EDU_OWNER_RELEASED;
+        mutex_unlock(&test->ops_lock);
+        idw_edu_pci_cleanup(test);
+        pci_set_drvdata(pdev, NULL);
+        idw_edu_owner_put(test);
+        idw_edu_remove_result = 0;
+        pr_info("IDW_QEMU_DMA: remove released all provider resources result=0\n");
 }
 
 static const struct pci_device_id idw_edu_ids[] = {
@@ -1446,11 +1938,21 @@ static int __init idw_edu_init(void)
 
 	idw_edu_test_result = -EINPROGRESS;
 	idw_edu_remove_result = -EINPROGRESS;
+	idw_edu_cleanup_wq = alloc_ordered_workqueue("idw_edu_cleanup",
+							 WQ_MEM_RECLAIM);
+	if (!idw_edu_cleanup_wq)
+		return -ENOMEM;
+	INIT_DELAYED_WORK(&idw_edu_cleanup_work, idw_edu_cleanup_work_fn);
 	ret = pci_register_driver(&idw_edu_driver);
-	if (ret)
+	if (ret) {
+		destroy_workqueue(idw_edu_cleanup_wq);
+		idw_edu_cleanup_wq = NULL;
 		return ret;
+	}
 	if (idw_edu_test_result == -EINPROGRESS) {
 		pci_unregister_driver(&idw_edu_driver);
+		destroy_workqueue(idw_edu_cleanup_wq);
+		idw_edu_cleanup_wq = NULL;
 		return -ENODEV;
 	}
 	return 0;
@@ -1458,12 +1960,20 @@ static int __init idw_edu_init(void)
 
 static void __exit idw_edu_exit(void)
 {
+	cancel_delayed_work_sync(&idw_edu_cleanup_work);
 	pci_unregister_driver(&idw_edu_driver);
+	if (idw_edu_cleanup_wq) {
+		destroy_workqueue(idw_edu_cleanup_wq);
+		idw_edu_cleanup_wq = NULL;
+	}
 	if (idw_edu_test_result == 0 && idw_edu_remove_result == 0) {
 		pr_info("IDW_QEMU_DMA: driver removal completed successfully\n");
+	} else if (idw_edu_probe_failure_test && idw_edu_owner_count == 0) {
+		pr_info("IDW_QEMU_DMA: probe failure test recovered owner before unload\n");
 	} else {
-		pr_err("IDW_QEMU_DMA: FAIL: probe_result=%d remove_result=%d\n",
-		       idw_edu_test_result, idw_edu_remove_result);
+		pr_err("IDW_QEMU_DMA: FAIL: probe_result=%d remove_result=%d owner_count=%u\n",
+		       idw_edu_test_result, idw_edu_remove_result,
+		       idw_edu_owner_count);
 		outb(IDW_QEMU_EXIT_FAIL, IDW_QEMU_DEBUG_EXIT_PORT);
 	}
 }

@@ -21,7 +21,7 @@ static void stop_guest(const char *reason)
 	_exit(1);
 }
 
-static int load_module(const char *path)
+static int load_module(const char *path, const char *args)
 {
 	struct stat st;
 	char *image;
@@ -54,9 +54,45 @@ static int load_module(const char *path)
 		offset += (size_t)count;
 	}
 	close(fd);
-	ret = (int)syscall(SYS_init_module, image, (size_t)st.st_size, "");
+	ret = (int)syscall(SYS_init_module, image, (size_t)st.st_size,
+			   args ? args : "");
 	free(image);
 	return ret;
+}
+
+static int cmdline_has(const char *needle)
+{
+	char buffer[1024];
+	int fd;
+	ssize_t count;
+
+	fd = open("/proc/cmdline", O_RDONLY);
+	if (fd < 0)
+		return 0;
+	count = read(fd, buffer, sizeof(buffer) - 1);
+	close(fd);
+	if (count <= 0)
+		return 0;
+	buffer[count] = '\0';
+	return strstr(buffer, needle) != NULL;
+}
+
+static int read_owner_count(void)
+{
+	char buffer[32];
+	int fd;
+	ssize_t count;
+
+	fd = open("/sys/module/idw_edu_dma_test/parameters/owner_count",
+		  O_RDONLY);
+	if (fd < 0)
+		return -1;
+	count = read(fd, buffer, sizeof(buffer) - 1);
+	close(fd);
+	if (count <= 0)
+		return -1;
+	buffer[count] = '\0';
+	return atoi(buffer);
 }
 
 static int run_program(const char *path)
@@ -92,6 +128,9 @@ static void signal_qemu_exit(unsigned char code)
 int main(void)
 {
 	int console;
+	int probe_failure_test;
+	int i;
+	int round;
 
 	mkdir("/dev", 0755);
 	mkdir("/proc", 0555);
@@ -106,6 +145,8 @@ int main(void)
 	    errno != EBUSY)
 		stop_guest("mount sysfs");
 
+	probe_failure_test = cmdline_has("idw_probe_failure_test=1");
+
 	console = open("/dev/console", O_RDWR);
 	if (console >= 0) {
 		dup2(console, STDIN_FILENO);
@@ -116,10 +157,36 @@ int main(void)
 	}
 
 	puts("IDW_QEMU_DMA: loading IDW core and QEMU EDU test driver");
-	if (load_module("/modules/idw_core.ko"))
+	if (load_module("/modules/idw_core.ko", ""))
 		stop_guest("load idw_core.ko");
-	if (load_module("/modules/idw_edu_dma_test.ko"))
+	if (load_module("/modules/idw_edu_dma_test.ko",
+			probe_failure_test ? "probe_failure_test=1" : ""))
 		stop_guest("load idw_edu_dma_test.ko or bind EDU device");
+
+	if (probe_failure_test) {
+		for (round = 0; round < 2; round++) {
+			if (round) {
+				if (load_module("/modules/idw_edu_dma_test.ko",
+						"probe_failure_test=1"))
+					stop_guest("reload probe failure test driver");
+			}
+			for (i = 0; i < 100; i++) {
+				if (read_owner_count() == 0)
+					break;
+				usleep(100000);
+			}
+			if (read_owner_count() != 0)
+				stop_guest("probe failure owner did not recover");
+			printf("IDW_QEMU_DMA: probe failure round %d owner recovered\n",
+			       round + 1);
+			if (syscall(SYS_delete_module, "idw_edu_dma_test", 0))
+				stop_guest("unload probe failure test driver");
+		}
+		puts("IDW_QEMU_DMA: PASS: probe failure cleanup, quarantine, retry, repeated owner release completed");
+		fflush(stdout);
+		signal_qemu_exit(0x10);
+		return 1;
+	}
 
 	puts("IDW_QEMU_DMA: running native DMA backend through MemoryManager");
 	fflush(stdout);

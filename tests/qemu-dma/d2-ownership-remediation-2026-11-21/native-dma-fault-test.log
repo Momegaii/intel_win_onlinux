@@ -1,0 +1,9 @@
+g++ -std=c++17 -Wall -Wextra -Werror -pedantic -Iinclude \
+	src/memory_manager.cpp src/native_dma_backend.cpp \
+	build/gpuva_model-native-dma-test.o \
+	build/page_table_memory-native-dma-test.o \
+	build/haswell_ppgtt_model-native-dma-test.o \
+	tests/native-dma-fault-test.cpp \
+	-o build/native-dma-fault-test
+./build/native-dma-fault-test
+SKIP: /dev/idw-edu-dma is not present; run under the QEMU EDU harness

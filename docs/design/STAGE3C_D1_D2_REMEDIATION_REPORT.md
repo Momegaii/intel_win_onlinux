@@ -7,6 +7,13 @@
 **Status:** **D1/D2 REMEDIATED — READY FOR INDEPENDENT REVIEW**
 **Stage 3C closure:** **NOT CLAIMED** — Check 15 physical Haswell evidence remains unavailable.
 
+> **D2 follow-up:** The probe-failure retention described in section 2 was
+> incomplete. It retained an unreachable owner and still tore down PCI
+> resources. The subsequent ownership-aware remediation adds a bounded,
+> synchronized registry, ordered cleanup, deferred PCI teardown, and retryable
+> recovery. See
+> `docs/design/STAGE3C_D2_OWNERSHIP_REMEDIATION_REPORT.md`.
+
 This pass changes only the D1/D2 ownership/accounting paths, their regression
 tests, and evidence. It does not activate a physical GPU, unbind i915, access
 MMIO, change PCI ownership, or implement Stage 3D.

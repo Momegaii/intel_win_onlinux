@@ -6,12 +6,22 @@ KDIR=${KDIR:-/lib/modules/$(uname -r)/build}
 KERNEL=${IDW_QEMU_KERNEL:-/boot/vmlinuz-linux}
 QEMU=${QEMU:-qemu-system-x86_64}
 BUILD_ONLY=false
+PROBE_FAILURE=false
 
 if [[ ${1:-} == --build-only ]]; then
     BUILD_ONLY=true
+elif [[ ${1:-} == --probe-failure ]]; then
+    PROBE_FAILURE=true
 elif [[ $# -ne 0 ]]; then
-    printf 'Usage: %s [--build-only]\n' "$0" >&2
+    printf 'Usage: %s [--build-only|--probe-failure]\n' "$0" >&2
     exit 2
+fi
+
+MODE_NAME=normal
+APPEND='console=ttyS0,115200 rdinit=/init loglevel=7 panic=-1'
+if [[ "$PROBE_FAILURE" == true ]]; then
+    MODE_NAME=probe-failure
+    APPEND+=' idw_probe_failure_test=1'
 fi
 
 for tool in cc cpio gzip file; do
@@ -89,6 +99,7 @@ printf 'Guest kernel: %s (%s)\n' "$KERNEL" "$KERNEL_RELEASE"
     printf 'Device: EDU PCI 1234:11e8, dma_mask=0xffffffffff\n'
     printf 'Command: %s -machine pc,accel=tcg -device edu,dma_mask=0xffffffffff\n' \
         "$QEMU"
+    printf 'Mode: %s\n' "$MODE_NAME"
 } > "$LOG"
 set +e
 # timeout puts QEMU in a separate process group. Detach stdin so the stdio
@@ -99,7 +110,7 @@ timeout --signal=TERM --kill-after=5 90 \
         -m 256M \
         -kernel "$KERNEL" \
         -initrd "$ROOT/build/qemu-dma/initramfs.cpio.gz" \
-        -append 'console=ttyS0,115200 rdinit=/init loglevel=7 panic=-1' \
+        -append "$APPEND" \
         -nodefaults \
         -no-reboot \
         -display none \
@@ -111,6 +122,24 @@ timeout --signal=TERM --kill-after=5 90 \
 QEMU_STATUS=${PIPESTATUS[0]}
 set -e
 printf 'QEMU exit status: %d\n' "$QEMU_STATUS" | tee -a "$LOG"
+
+if [[ "$PROBE_FAILURE" == true ]]; then
+    if [[ $QEMU_STATUS -eq 33 ]] &&
+       grep -q 'IDW_QEMU_DMA: probe failure retained owner' "$LOG" &&
+       grep -q 'IDW_QEMU_DMA: owner .* released probe-failure test page' "$LOG" &&
+       grep -q 'IDW_QEMU_DMA: owner .* released state=RELEASED' "$LOG" &&
+       grep -q 'IDW_QEMU_DMA: probe failure test recovered owner before unload' "$LOG" &&
+       grep -q 'IDW_QEMU_DMA: probe failure round 1 owner recovered' "$LOG" &&
+       grep -q 'IDW_QEMU_DMA: probe failure round 2 owner recovered' "$LOG" &&
+       grep -q 'IDW_QEMU_DMA: PASS: probe failure cleanup, quarantine, retry, repeated owner release completed' "$LOG"; then
+        printf 'PASS: QEMU EDU probe failure retained a reachable owner, deferred PCI cleanup, released the injected dependency, and recovered.\n'
+        exit 0
+    fi
+    printf 'FAIL: QEMU probe-failure lifecycle did not complete (status=%d).\n' \
+        "$QEMU_STATUS" >&2
+    printf 'Log: %s\n' "$LOG" >&2
+    exit 1
+fi
 
 if [[ $QEMU_STATUS -eq 33 ]] &&
    grep -q 'IDW_QEMU_DMA: page-table DMA layout verified' "$LOG" &&
