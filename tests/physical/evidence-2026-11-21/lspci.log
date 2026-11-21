@@ -1,0 +1,14 @@
+00:00.0 Host bridge [0600]: Intel Corporation 440FX - 82441FX PMC [Natoma] [8086:1237] (rev 02)
+	Subsystem: Red Hat, Inc. Qemu virtual machine [1af4:1100]
+00:01.0 ISA bridge [0601]: Intel Corporation 82371AB/EB/MB PIIX4 ISA [8086:7110] (rev 03)
+00:01.3 Bridge [0680]: Intel Corporation 82371AB/EB/MB PIIX4 ACPI [8086:7113] (rev 03)
+	Kernel modules: i2c_piix4
+00:03.0 Ethernet controller [0200]: Google, Inc. Compute Engine Virtual Ethernet [gVNIC] [1ae0:0042]
+	Subsystem: Google, Inc. Device [1ae0:0058]
+	Kernel driver in use: gve
+	Kernel modules: gve
+00:04.0 Unclassified device [00ff]: Red Hat, Inc. Virtio RNG [1af4:1005]
+	Subsystem: Red Hat, Inc. Device [1af4:0004]
+	Kernel driver in use: virtio-pci
+00:05.0 Non-Volatile memory controller [0108]: Google, Inc. NVMe device [1ae0:001f] (rev 01)
+	Kernel driver in use: nvme

@@ -200,6 +200,10 @@ The QEMU EDU happy path is real virtual-device DMA evidence and it passed. It do
 ### Check 15 — GGTT and hardware execution boundary
 
 - **Status:** **INSUFFICIENT EVIDENCE** (code boundary appears clean; host i915 binding unverified)
+- **2026-11-21 follow-up:** added `tests/physical/haswell-evidence.sh` and
+  `make physical-evidence`. The current Google Compute Engine VM returns
+  `TARGET_GPU_NOT_PRESENT`; the target device, `/dev/dri`, i915, IOMMU groups,
+  and `/dev/vfio` are absent. Check 15 remains open.
 - **Source File & Function:** `kernel/idw_edu_dma_test_main.c:25-37` (EDU IDs/registers), `:973` (EDU BAR `pci_iomap`), `:61` (EDU `readl_poll_timeout`), `:1119-1123` (EDU-only ID table); `src/native_dma_backend.cpp:687-705` (no MMIO); `src/haswell_ppgtt_model.c:486-488` (CPU model PTE writes).
 - **Exact Relevant Lines:** The only `pci_iomap`/`readl`/`writeq` operations in the native test path target the QEMU EDU BAR (`kernel/idw_edu_dma_test_main.c:61,69-74,973`). The driver ID table is `PCI_DEVICE(0x1234, 0x11e8)` at `:1119-1120`. No native backend code references a Haswell PCI ID, GPU BAR, MMIO register, ring, GGTT, or `PP_DIR_BASE`. The model writes PTEs to a userspace page-table page at `src/haswell_ppgtt_model.c:486-491`, not to hardware.
 - **Test & Output:** `lspci` is not installed. `/sys/bus/pci/devices/0000:00:02.0` is **absent**; `grep -w i915 /proc/modules` is **absent**; `/dev/dri` is **absent**. Visible PCI devices are 8086:1237, 8086:7110, 8086:7113, gve, virtio-pci, and nvme. Therefore this audit cannot verify that `0000:00:02.0` remains bound to i915. It also found no evidence of a physical operation being attempted.

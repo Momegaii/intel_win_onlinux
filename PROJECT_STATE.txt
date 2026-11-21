@@ -265,3 +265,14 @@ QEMU normal, and QEMU `--probe-failure` pass; `make test` still stops at the
 pre-existing no-Intel-render-node smoke check. Evidence:
 `tests/qemu-dma/d2-ownership-remediation-final-2026-11-21/`. No physical
 Haswell operation, i915 unbind, MMIO, or Stage 3C closure is claimed.
+
+2026-11-21 physical Haswell evidence attempt: added a read-only Check 15
+collector (`tests/physical/haswell-evidence.sh`, `make physical-evidence`)
+that records target `0000:00:02.0`, vendor/device `8086:0412`, i915 binding,
+and `/dev/dri/renderD128`. The current Google Compute Engine VM reports
+`TARGET_GPU_NOT_PRESENT`: no target PCI device, no `/dev/dri`, no i915, no
+IOMMU groups, no `/dev/vfio`; `modprobe i915` is denied by container
+capabilities. This is evidence of absence, not physical Haswell evidence.
+Stage 3C remains open. See
+`docs/design/STAGE3C_PHYSICAL_EVIDENCE_RUNBOOK.md` and
+`tests/physical/evidence-2026-11-21/`.

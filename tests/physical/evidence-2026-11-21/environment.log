@@ -1,0 +1,8 @@
+date_utc=2026-11-21T12:37:16Z
+uname=Linux runtime-pxnhkrqiyeijsprj-565f7c8ddf-q44rb 6.8.0-1055-gke #61-Ubuntu SMP Tue May 26 22:57:42 UTC 2026 x86_64 GNU/Linux
+architecture=x86_64
+virtualization=container-other
+hypervisor_type=none
+kernel_cmdline=BOOT_IMAGE=/vmlinuz-6.8.0-1055-gke root=PARTUUID=ddf8e044-739c-47c8-9bec-bc40a29caf99 ro console=ttyS0,115200 panic=-1
+os=Debian GNU/Linux 13 (trixie)
+model name	: AMD EPYC 9B14

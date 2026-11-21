@@ -1,5 +1,11 @@
 # Change log
 
+## 2026-11-21 — Physical Haswell evidence collector
+- Added `tests/physical/haswell-evidence.sh` and `make physical-evidence` for read-only Stage 3C Check 15 collection: target PCI address, `8086:0412`, `i915` binding, and render node.
+- Added `docs/design/STAGE3C_PHYSICAL_EVIDENCE_RUNBOOK.md` and recorded the current VM result at `tests/physical/evidence-2026-11-21/`.
+- The current Google Compute Engine VM reports `TARGET_GPU_NOT_PRESENT`; no physical Haswell evidence or Stage 3C closure is claimed.
+- D2 lifetime corrections were merged as PR #7 (`4512e95`).
+
 ## 2026-11-21 — Stage 3C D2 ownership lifetime corrections
 - Pinned the retained QEMU EDU owner's `struct pci_dev` with `pci_dev_get()` and released it with `pci_dev_put()` in the kref release callback.
 - Corrected PCI teardown to `pci_iounmap()` then `pci_disable_device()` then `pci_release_regions()`, matching the Linux PCI driver guide.

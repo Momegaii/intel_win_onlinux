@@ -8,7 +8,7 @@ BUILD := build
 BIN := $(BUILD)/idwctl
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
-.PHONY: all clean test contract-test backend-contract-test i915-resource-test i915-memory-backend-test gpu-submission-test memory-manager-test host-memory-backend-test native-dma-backend-test native-dma-backend-test-static native-dma-fault-test native-dma-fault-test-static abi-test ppgtt-model-test pt-dma-adapter-test ggtt-allocator-test haswell-gtt-hw-test device-lifecycle-test stage3a-test stage3a-sanitize-test cli-test gpu-test gpu-resource-test gpu-memory-test gpu-memory-manager-test gpu-resource-write-test qemu-dma-test install-user install-system-helper kernel kernel-clean
+.PHONY: all clean test contract-test backend-contract-test i915-resource-test i915-memory-backend-test gpu-submission-test memory-manager-test host-memory-backend-test native-dma-backend-test native-dma-backend-test-static native-dma-fault-test native-dma-fault-test-static abi-test ppgtt-model-test pt-dma-adapter-test ggtt-allocator-test haswell-gtt-hw-test device-lifecycle-test stage3a-test stage3a-sanitize-test cli-test gpu-test gpu-resource-test gpu-memory-test gpu-memory-manager-test gpu-resource-write-test qemu-dma-test physical-evidence install-user install-system-helper kernel kernel-clean
 all: $(BIN)
 $(BUILD)/gpuva_model.o: src/gpuva_model.c include/idw/gpuva_model.h \
 		include/idw/contracts/base.h
@@ -204,6 +204,8 @@ gpu-resource-write-test: all
 	./tests/gpu-resource-write-smoke.sh
 qemu-dma-test:
 	./tests/qemu-dma/run.sh
+physical-evidence:
+	./tests/physical/haswell-evidence.sh $(PHYSICAL_EVIDENCE_DIR)
 kernel:
 	$(MAKE) -C $(KDIR) M=$(CURDIR)/kernel CC=$(CC) modules
 kernel-clean:
