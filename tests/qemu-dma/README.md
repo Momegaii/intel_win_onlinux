@@ -8,15 +8,16 @@ callback pretending to perform DMA and not proof of Haswell DMA behavior.
 The register and transfer behavior follows the
 [QEMU EDU device specification](https://github.com/qemu/qemu/blob/master/docs/specs/edu.rst).
 
-The guest PCI driver binds only to EDU. It sets 40-bit streaming/coherent DMA
-masks, initializes the IDW provider with the bound PCI device and its own
+The guest PCI driver binds only to EDU. It sets a 39-bit streaming DMA mask and
+a 40-bit coherent DMA mask, initializes the IDW provider with the bound PCI device and its own
 module identity, exercises owner/mask/descriptor rejection, copies a populated
 Gen7.5 page table through EDU and verifies its exact layout, performs 32
 device-side read-then-write round trips through coherent pages, checks exact
-CPU readback, and leaves one allocation outstanding for PCI remove/provider
-teardown to free. DMA write/read barriers surround the coherent-buffer
-transfers. The guest runner unloads the test driver so its PCI `remove` callback
-and provider cleanup are part of the success condition.
+CPU readback, and releases every allocation before PCI remove/provider
+teardown. DMA write/read barriers surround the coherent-buffer transfers. The
+guest runner unloads the test driver so its PCI `remove` callback and provider
+cleanup are part of the success condition; removal fails closed and quarantines
+if any page, resource, or VMA reference remains.
 
 After the kernel self-test, the guest runs the static
 `native-dma-backend-test`. It uses `NativeDmaMemoryBackend` through
@@ -26,6 +27,13 @@ write/read a dword from the CPU, submit a dword write and wait, reject destroy
 while bound, unbind, destroy, and close. The test must print
 `PASS: native DMA backing, real DMA addresses, PPGTT translation, submission,
 and cleanup`.
+
+The guest then runs `native-dma-fault-test`, which injects backing allocation,
+page-table allocation, mmap, sync, bind, unbind, and destroy failures. It checks
+quarantine transitions, retry after partial unbind, recovery after a failed
+bind, and that all ownership counters return to zero only after model and
+provider teardown. It must print `PASS: native DMA backend fault injection,
+retry, and ownership counters`.
 
 ## Run
 

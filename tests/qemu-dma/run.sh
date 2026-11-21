@@ -49,12 +49,15 @@ trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/root/modules" "$ROOT/build/qemu-dma"
 cp "$ROOT/kernel/idw_core.ko" "$WORK/root/modules/"
 cp "$ROOT/kernel/idw_edu_dma_test.ko" "$WORK/root/modules/"
-make -C "$ROOT" native-dma-backend-test-static
+make -C "$ROOT" native-dma-backend-test-static native-dma-fault-test-static
 cp "$ROOT/build/native-dma-backend-test-static" \
     "$WORK/root/native-dma-backend-test"
+cp "$ROOT/build/native-dma-fault-test-static" \
+    "$WORK/root/native-dma-fault-test"
 cc -static -O2 -Wall -Wextra -Werror \
     "$ROOT/tests/qemu-dma/guest_init.c" -o "$WORK/root/init"
-chmod 0755 "$WORK/root/init" "$WORK/root/native-dma-backend-test"
+chmod 0755 "$WORK/root/init" "$WORK/root/native-dma-backend-test" \
+    "$WORK/root/native-dma-fault-test"
 (
     cd "$WORK/root"
     find . -print0 | cpio --null -o --format=newc 2>/dev/null | gzip -n
@@ -112,7 +115,9 @@ printf 'QEMU exit status: %d\n' "$QEMU_STATUS" | tee -a "$LOG"
 if [[ $QEMU_STATUS -eq 33 ]] &&
    grep -q 'IDW_QEMU_DMA: page-table DMA layout verified' "$LOG" &&
    grep -q 'IDW_QEMU_DMA: 3-page resource backing DMA, 39-bit validation, PPGTT PTE consumption, sync, and cleanup verified' "$LOG" &&
+   grep -q 'IDW_QEMU_DMA: backing allocation/mapping fault injection verified' "$LOG" &&
    grep -q 'PASS: native DMA backing, real DMA addresses, PPGTT translation, submission, and cleanup' "$LOG" &&
+   grep -q 'PASS: native DMA backend fault injection, retry, and ownership counters' "$LOG" &&
    grep -q 'IDW_QEMU_DMA: PASS: probe, page-table DMA, 32 DMA cycles, cleanup and remove completed' "$LOG"; then
     printf 'PASS: QEMU EDU performed device-side DMA read/write, page-table DMA visibility, resource backing DMA, and provider removal cleanup.\n'
     exit 0

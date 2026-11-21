@@ -59,7 +59,7 @@ static int load_module(const char *path)
 	return ret;
 }
 
-static int run_native_dma_backend_test(void)
+static int run_program(const char *path)
 {
         pid_t pid;
         int status;
@@ -68,8 +68,7 @@ static int run_native_dma_backend_test(void)
         if (pid < 0)
                 return -1;
         if (pid == 0) {
-                execl("/native-dma-backend-test", "native-dma-backend-test",
-                      "--require-device", (char *)NULL);
+                execl(path, path, "--require-device", (char *)NULL);
                 _exit(127);
         }
         if (waitpid(pid, &status, 0) != pid)
@@ -124,8 +123,13 @@ int main(void)
 
 	puts("IDW_QEMU_DMA: running native DMA backend through MemoryManager");
 	fflush(stdout);
-	if (run_native_dma_backend_test())
+	if (run_program("/native-dma-backend-test"))
 		stop_guest("native DMA backend test");
+
+	puts("IDW_QEMU_DMA: running native DMA fault injection and retry tests");
+	fflush(stdout);
+	if (run_program("/native-dma-fault-test"))
+		stop_guest("native DMA fault test");
 
 	if (syscall(SYS_delete_module, "idw_edu_dma_test", 0))
 		stop_guest("unload test driver and run PCI remove");
