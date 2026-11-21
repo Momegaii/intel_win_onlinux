@@ -197,7 +197,8 @@ IDW_QEMU_DMA: PASS: probe failure cleanup, quarantine, retry, repeated owner rel
   not part of a production ownership path.
 - `make test` still stops at the pre-existing smoke check because no Intel
   render node exists in the container.
-- No push, merge, or pull request is part of this pass.
+- The D2 pass was subsequently pushed and merged as PR #7
+  (merge commit `4512e95e6ecad5a2d7f0340f90ad88b38b648b86`).
 
 ## 8. Files changed
 
@@ -224,3 +225,23 @@ The synthetic owner lifecycle test now inserts its owner after its adapter,
 page-table page, and resource exist, eliminating the retry-worker setup race.
 The probe-failure quarantine comment now states the test-only boundary next to
 the `fail_provider` label.
+
+## 10. Physical evidence attempt (2026-11-21)
+
+A read-only Check 15 collector was added at
+`tests/physical/haswell-evidence.sh` with `make physical-evidence`. It checks
+for `0000:00:02.0`, vendor/device `8086:0412`, `i915` binding, and
+`/dev/dri/renderD128`.
+
+The current Google Compute Engine VM has no target GPU:
+
+- `0000:00:02.0` absent
+- `/dev/dri` absent
+- `i915` not loaded
+- IOMMU groups: 0
+- `/dev/vfio` absent
+- `modprobe i915` denied by container capabilities
+
+Result: `TARGET_GPU_NOT_PRESENT`. Evidence:
+`tests/physical/evidence-2026-11-21/`. This is evidence of absence, not
+physical Haswell evidence. Stage 3C remains open.

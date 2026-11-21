@@ -1,0 +1,6 @@
+0000:00:00.0 vendor=0x8086 device=0x1237 class=0x060000 driver=driver
+0000:00:01.0 vendor=0x8086 device=0x7110 class=0x060100 driver=driver
+0000:00:01.3 vendor=0x8086 device=0x7113 class=0x068000 driver=driver
+0000:00:03.0 vendor=0x1ae0 device=0x0042 class=0x020000 driver=gve
+0000:00:04.0 vendor=0x1af4 device=0x1005 class=0x00ff00 driver=virtio-pci
+0000:00:05.0 vendor=0x1ae0 device=0x001f class=0x010802 driver=nvme

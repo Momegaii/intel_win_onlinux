@@ -1023,3 +1023,14 @@ make test: stops only at the pre-existing no-Intel-render-node smoke check
 Evidence: `tests/qemu-dma/d2-ownership-remediation-final-2026-11-21/`.
 No physical Haswell operation, i915 unbind, MMIO, or Stage 3C closure is
 claimed.
+
+### Physical Haswell evidence attempt
+
+Added a read-only Check 15 collector and recorded the current VM result. The
+host is a Google Compute Engine VM with no target `8086:0412`, no `/dev/dri`,
+no i915, no IOMMU groups, and no `/dev/vfio`. `modprobe i915` fails with
+`Operation not permitted`. The result is `TARGET_GPU_NOT_PRESENT`, which is
+evidence of absence and does not close Stage 3C.
+
+Evidence: `tests/physical/evidence-2026-11-21/`.
+Runbook: `docs/design/STAGE3C_PHYSICAL_EVIDENCE_RUNBOOK.md`.

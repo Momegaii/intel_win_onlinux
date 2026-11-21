@@ -1,0 +1,5 @@
+target_present=false
+target_vendor=unknown
+target_device=unknown
+target_driver=none
+result=TARGET_GPU_NOT_PRESENT
