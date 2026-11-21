@@ -1,5 +1,12 @@
 # Change log
 
+## 2026-11-20 — Host-RAM backing provider
+- Added `include/idw/host_memory_backend.hpp` / `src/host_memory_backend.cpp`: an IDW-owned `MemoryBackendOps` provider that creates a real `memfd`, sizes it, maps it, and zero-faults every page. It supports CPU dword access and synchronous host writes, and refuses destroy while bound.
+- Integrated the provider with the existing `MemoryManager`; no new manager layer was added. `bind` records the manager-reserved GPU VA, `invalidate` is a validated no-op, and fences are already complete.
+- Added `tests/host-memory-backend-test.cpp` and `make host-memory-backend-test`. The test proves real page residency with `mincore()`, cross-page contents, distinct allocations, destroy-while-bound, manager bind/submit/readback/unbind/destroy, and cleanup. ASan/UBSan with leak detection passed.
+- Added `docs/design/HOST_MEMORY_BACKING_IMPLEMENTATION.md` with the exact callback trace, metadata-only paths, missing backend interfaces, reusable components, and the next DMA-backed step.
+- This is real host RAM, not a GEM object, DMA mapping, GPU-visible allocation, page-table publication, or physical GPU backend. i915 remains bound and no hardware operation was performed.
+
 ## 2026-11-20 — Stage 3B design closure and physical readiness audit
 - Added `docs/design/HASWELL_GEN75_STAGE3B_PHYSICAL_READINESS_MATRIX.md` separating implemented/unit-tested, simulated, QEMU, i915-assisted, and independent-physical evidence, with a NO-GO decision and explicit entry criteria.
 - Fixed activation save/restore to snapshot the programmed `PP_DIR_BASE`, not `PP_DIR_BASE_READ`; a divergent-readback test proves the choice.

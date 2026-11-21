@@ -2,6 +2,23 @@
 
 Date: 2026-11-20
 
+## Host-RAM backing provider
+
+Added the first real native backing provider integrated with the existing
+`MemoryManager`. `HostMemoryBackend` creates a real `memfd`, sizes it, maps it,
+and zero-faults every page; it supports CPU dword access and synchronous host
+writes, records the manager-reserved GPU VA on bind, and refuses destroy while
+bound. No new manager or abstraction layer was added.
+
+The test `make host-memory-backend-test` proves page residency with `mincore()`,
+cross-page contents, distinct allocations, the complete manager lifecycle,
+destroy-while-bound, invalid-input rejection, and cleanup. ASan/UBSan with leak
+detection passed. This is real host RAM only: it is not GEM, not DMA-mapped, not
+GPU-visible, and not page-table-published. i915 remains bound; no MMIO, BAR,
+PCI ownership, or physical GPU operation was performed.
+
+Report: `docs/design/HOST_MEMORY_BACKING_IMPLEMENTATION.md`.
+
 ## Stage 3B design closure and physical readiness audit
 
 Completed the Stage 3B software/design closure without unbinding i915, binding

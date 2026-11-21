@@ -8,7 +8,7 @@ BUILD := build
 BIN := $(BUILD)/idwctl
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
-.PHONY: all clean test contract-test backend-contract-test i915-resource-test i915-memory-backend-test gpu-submission-test memory-manager-test abi-test ppgtt-model-test pt-dma-adapter-test ggtt-allocator-test haswell-gtt-hw-test device-lifecycle-test stage3a-test stage3a-sanitize-test cli-test gpu-test gpu-resource-test gpu-memory-test gpu-memory-manager-test gpu-resource-write-test qemu-dma-test install-user install-system-helper kernel kernel-clean
+.PHONY: all clean test contract-test backend-contract-test i915-resource-test i915-memory-backend-test gpu-submission-test memory-manager-test host-memory-backend-test abi-test ppgtt-model-test pt-dma-adapter-test ggtt-allocator-test haswell-gtt-hw-test device-lifecycle-test stage3a-test stage3a-sanitize-test cli-test gpu-test gpu-resource-test gpu-memory-test gpu-memory-manager-test gpu-resource-write-test qemu-dma-test install-user install-system-helper kernel kernel-clean
 all: $(BIN)
 $(BUILD)/gpuva_model.o: src/gpuva_model.c include/idw/gpuva_model.h \
 		include/idw/contracts/base.h
@@ -55,6 +55,16 @@ memory-manager-test:
 		tests/memory-manager-test.cpp \
 		-o $(BUILD)/memory-manager-test
 	./$(BUILD)/memory-manager-test
+host-memory-backend-test:
+	@mkdir -p $(BUILD)
+	$(CC) -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+		-c src/gpuva_model.c -o $(BUILD)/gpuva_model-host-memory-test.o
+	$(CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -Iinclude \
+		src/memory_manager.cpp src/host_memory_backend.cpp \
+		$(BUILD)/gpuva_model-host-memory-test.o \
+		tests/host-memory-backend-test.cpp \
+		-o $(BUILD)/host-memory-backend-test
+	./$(BUILD)/host-memory-backend-test
 i915-memory-backend-test: $(BUILD)/gpuva_model.o
 	$(CXX) $(CPPFLAGS) -std=c++17 -Wall -Wextra -Werror -Iinclude \
 		src/memory_manager.cpp src/i915_gem_resource_backend.cpp \
@@ -121,7 +131,7 @@ stage3a-sanitize-test:
 	ASAN_OPTIONS=detect_leaks=1 ./build/sanitize/haswell-gtt-hw-test
 cli-test: all
 	./tests/cli-arguments-smoke.sh
-test: all contract-test backend-contract-test i915-resource-test i915-memory-backend-test gpu-submission-test memory-manager-test abi-test ppgtt-model-test pt-dma-adapter-test ggtt-allocator-test haswell-gtt-hw-test device-lifecycle-test cli-test
+test: all contract-test backend-contract-test i915-resource-test i915-memory-backend-test gpu-submission-test memory-manager-test host-memory-backend-test abi-test ppgtt-model-test pt-dma-adapter-test ggtt-allocator-test haswell-gtt-hw-test device-lifecycle-test cli-test
 	./tests/smoke.sh
 	./tests/gem-resource-backend-smoke.sh
 	./tests/kernel-query-smoke.sh

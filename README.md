@@ -11,6 +11,9 @@ IDW is a Windows-inspired graphics-kernel architecture project for Linux. The Aâ
 - Provides an integrated allocation/VA/bind/submit/completion/unbind/destroy
   lifecycle through an i915-assisted backend; the explicit Haswell test passes
   with i915 retaining hardware ownership.
+- Provides `HostMemoryBackend`, a real host-RAM backing provider integrated
+  with `MemoryManager` using a zero-faulted `memfd` mapping. It is not a GEM
+  object, not DMA-mapped, not GPU-visible, and not page-table-published.
 - Verifies an actual GPU write into a managed GEM resource on Haswell/i915:
   the CPU initializes `0x13579bdf`, the GPU writes `0x2468ace0`, and CPU
   readback confirms the exact result. This is Stage 1 evidence only; i915 owns

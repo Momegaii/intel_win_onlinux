@@ -138,10 +138,14 @@ allocation lifecycle coordinator over a replaceable backend callback table.
 It tracks backing objects, address reservations, backend bindings, invalidation
 recovery, and submission references. A timed-out or failed wait does not drop
 the reference; the backend must positively confirm quiescence before recovery
-releases it. The test backend is simulated and does not integrate with i915 or
-native DMA. A separate public-ioctl i915-assisted adapter is now connected and
-hardware-tested; i915 continues to own the mappings and execution. Neither path
-is IDW-owned hardware memory management or native DMA.
+releases it. A separate public-ioctl i915-assisted adapter is connected and
+hardware-tested; i915 continues to own the mappings and execution.
+`HostMemoryBackend` now supplies a real IDW-owned host-RAM backing path through
+the same callback table: a zero-faulted `memfd` mapping with CPU access and
+synchronous host writes. It is not GEM, not DMA-mapped, not GPU-visible, and
+does not populate or publish page tables. The fake test backend remains only a
+deterministic test double. None of these paths is IDW-owned hardware memory
+management or native DMA.
 
 Page allocations and page-sized mapped addresses are tagged with an opaque
 device scope and lifetime cookie. The CPU model rejects cross-scope table pages

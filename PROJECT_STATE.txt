@@ -1,7 +1,21 @@
 IDW PROJECT SNAPSHOT
-Version: 1.3.0-stage3b-readiness
+Version: 1.4.0-host-backing
 Target: Intel HD Graphics 4600 / Haswell GT2 / PCI 8086:0412
 Host driver ownership: i915
+
+2026-11-20 Host-RAM backing provider:
+Added `HostMemoryBackend`, a real `MemoryBackendOps` provider integrated with
+the existing `MemoryManager`. `create_backing` creates a memfd, sizes and maps
+it, and zero-faults every page; `destroy_backing` refuses while bound; `bind`
+records the manager-reserved GPU VA; `submit` performs a synchronous host write;
+and CPU dword access goes directly to the mapping. `make
+host-memory-backend-test` proves page residency with `mincore()`, cross-page
+contents, distinct allocations, manager lifecycle, destroy-while-bound, and
+cleanup; ASan/UBSan with leak detection passed. This is real host RAM, not a
+GEM object, DMA mapping, GPU-visible allocation, page-table publication, or
+physical GPU backend. The report is
+`docs/design/HOST_MEMORY_BACKING_IMPLEMENTATION.md`. i915 remains bound and no
+hardware operation was performed.
 
 2026-11-20 Stage 3B design closure and physical readiness audit:
 Closed the Stage 3B software/design gate without touching hardware. Added
