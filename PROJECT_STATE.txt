@@ -276,3 +276,10 @@ capabilities. This is evidence of absence, not physical Haswell evidence.
 Stage 3C remains open. See
 `docs/design/STAGE3C_PHYSICAL_EVIDENCE_RUNBOOK.md` and
 `tests/physical/evidence-2026-11-21/`.
+
+2026-11-21 read-only evidence API: `tools/idw-evidence-api.py` wraps the
+physical Haswell collector with a fixed `POST /collect` endpoint. It binds to
+localhost by default, requires a bearer token, and returns only the collector
+logs. It does not expose a shell, accept command arguments, or perform GPU
+ownership operations. Intended access is through Tailscale or a temporary
+Cloudflare Tunnel; see `docs/design/STAGE3C_EVIDENCE_API.md`.

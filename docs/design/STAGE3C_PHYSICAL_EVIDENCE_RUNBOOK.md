@@ -26,6 +26,9 @@ a software DRM device, or a QEMU display adapter is not a substitute.
 make physical-evidence PHYSICAL_EVIDENCE_DIR=tests/physical/evidence-$(date -u +%Y%m%dT%H%M%SZ)
 ```
 
+For a read-only HTTP wrapper that can be reached through a private tunnel, see
+`docs/design/STAGE3C_EVIDENCE_API.md`.
+
 Use a new directory for each run. To overwrite an existing evidence
 directory deliberately, pass `--force` to the script.
 
