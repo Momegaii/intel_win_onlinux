@@ -2,8 +2,10 @@
 
 > **Historical audit.** Remediation is recorded in
 > `docs/design/STAGE3C_REMEDIATION_REPORT.md` and
-> `tests/qemu-dma/STAGE3C_REMEDIATION_EVIDENCE.md`. Check 15 remains
-> environment-limited because this container exposes no physical Intel GPU.
+> `tests/qemu-dma/STAGE3C_REMEDIATION_EVIDENCE.md`. This container exposed no
+> physical Intel GPU. Check 15 was subsequently verified on a bare-metal
+> Haswell host on 2026-11-21; see
+> `tests/physical/evidence-2026-11-21-host/`. Stage 3C remains open.
 
 **Repository:** `Momegaii/intel_win_onlinux`  
 **Pull request:** [#5 — Add native DMA resource backing through MemoryManager](https://github.com/Momegaii/intel_win_onlinux/pull/5)  
@@ -30,7 +32,7 @@
 
 The complete PR diff is `c596f5b..fa2e918`: 24 files, 3,690 insertions, 21 deletions. It includes the host-memory provider from `b9f3dd6` and the native DMA resource path from `fa2e918`. This audit focuses on the Stage 3C native DMA contract, while checking the full PR for boundary violations.
 
-**Safety boundary:** No physical Haswell BAR, MMIO, DMA, GPU submission, PPGTT activation, or PCI ownership change was performed. The host container exposes no `0000:00:02.0` device and does not load i915, so host i915 binding could not be verified from this environment. QEMU EDU evidence is kept separate from physical Haswell evidence.
+**Safety boundary:** No physical Haswell BAR, MMIO, DMA, GPU submission, PPGTT activation, or PCI ownership change was performed by this audit. The audit container exposed no `0000:00:02.0` device and did not load i915, so host i915 binding could not be verified from that environment. A later read-only host run verified i915 binding; see `tests/physical/evidence-2026-11-21-host/`. QEMU EDU evidence is kept separate from physical Haswell evidence.
 
 ---
 
@@ -199,16 +201,20 @@ The QEMU EDU happy path is real virtual-device DMA evidence and it passed. It do
 
 ### Check 15 — GGTT and hardware execution boundary
 
-- **Status:** **INSUFFICIENT EVIDENCE** (code boundary appears clean; host i915 binding unverified)
+- **Status:** **PASS** (read-only physical binding evidence collected; no physical operation performed)
 - **2026-11-21 follow-up:** added `tests/physical/haswell-evidence.sh` and
-  `make physical-evidence`. The current Google Compute Engine VM returns
-  `TARGET_GPU_NOT_PRESENT`; the target device, `/dev/dri`, i915, IOMMU groups,
-  and `/dev/vfio` are absent. Check 15 remains open.
+  `make physical-evidence`. The original Google Compute Engine VM returned
+  `TARGET_GPU_NOT_PRESENT`; that was evidence of absence.
+- **2026-11-21 host result:** a bare-metal Arch Linux host reported
+  `0000:00:02.0`, `8086:0412`, `i915` bound, and
+  `/dev/dri/renderD128` present. Evidence:
+  `tests/physical/evidence-2026-11-21-host/`. The run was read-only: no
+  unbind, MMIO, BAR mapping, reset, or PCI ownership change.
 - **Source File & Function:** `kernel/idw_edu_dma_test_main.c:25-37` (EDU IDs/registers), `:973` (EDU BAR `pci_iomap`), `:61` (EDU `readl_poll_timeout`), `:1119-1123` (EDU-only ID table); `src/native_dma_backend.cpp:687-705` (no MMIO); `src/haswell_ppgtt_model.c:486-488` (CPU model PTE writes).
 - **Exact Relevant Lines:** The only `pci_iomap`/`readl`/`writeq` operations in the native test path target the QEMU EDU BAR (`kernel/idw_edu_dma_test_main.c:61,69-74,973`). The driver ID table is `PCI_DEVICE(0x1234, 0x11e8)` at `:1119-1120`. No native backend code references a Haswell PCI ID, GPU BAR, MMIO register, ring, GGTT, or `PP_DIR_BASE`. The model writes PTEs to a userspace page-table page at `src/haswell_ppgtt_model.c:486-491`, not to hardware.
-- **Test & Output:** `lspci` is not installed. `/sys/bus/pci/devices/0000:00:02.0` is **absent**; `grep -w i915 /proc/modules` is **absent**; `/dev/dri` is **absent**. Visible PCI devices are 8086:1237, 8086:7110, 8086:7113, gve, virtio-pci, and nvme. Therefore this audit cannot verify that `0000:00:02.0` remains bound to i915. It also found no evidence of a physical operation being attempted.
-- **Untested Failure Path:** Host i915 binding; physical BAR ownership; physical MMIO; physical GGTT; physical ring submission; physical PPGTT activation.
-- **Blocking Defects and Required Corrections:** No physical hardware operation was found in the inspected source, and no physical operation was performed by this audit. However, the required i915 binding evidence is missing. Re-run the read-only `lspci -nnk -s 00:02.0` and `/sys/bus/pci/devices/0000:00:02.0/driver` checks on a host that exposes the GPU, and record the result. Do not claim binding from this container.
+- **Test & Output:** In the original audit container, `lspci` was not installed, `/sys/bus/pci/devices/0000:00:02.0` was **absent**, `i915` was **absent**, and `/dev/dri` was **absent**. The later host run recorded `TARGET_GPU_PRESENT: 0000:00:02.0 vendor=0x8086 device=0x0412 driver=i915`, `i915` loaded, and `renderD128` present. `systemd-detect-virt` reported `none`.
+- **Untested Failure Path:** Physical BAR ownership; physical MMIO; physical GGTT; physical ring submission; physical PPGTT activation. i915 binding itself is now recorded.
+- **Blocking Defects and Required Corrections:** No physical hardware operation was found in the inspected source, and no physical operation was performed by this audit. The missing i915 binding evidence is now supplied by the host run. Do not treat that PASS as proof of physical BAR/MMIO/GGTT/PPGTT/submission behavior; those remain untested.
 
 ### Check 16 — Failure-path evidence
 

@@ -1,0 +1,9 @@
+TARGET_GPU_PRESENT: 0000:00:02.0 vendor=0x8086 device=0x0412 driver=i915
+00:02.0 VGA compatible controller [0300]: Intel Corporation Xeon E3-1200 v3/4th Gen Core Processor Integrated Graphics Controller [8086:0412] (rev 06)
+	DeviceName:  Onboard IGD
+	Subsystem: ASUSTeK Computer Inc. Device [1043:8534]
+	Kernel driver in use: i915
+	Kernel modules: i915
+sysfs_vendor=0x8086
+sysfs_device=0x0412
+sysfs_driver=i915

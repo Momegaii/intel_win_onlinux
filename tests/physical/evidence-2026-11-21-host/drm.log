@@ -1,0 +1,9 @@
+total 0
+drwxr-xr-x  2 root root         80 Nov 21 11:57 by-path
+crw-rw----+ 1 root video  226,   1 Nov 21 11:58 card1
+crw-rw-rw-  1 root render 226, 128 Nov 21 11:57 renderD128
+/sys/class/drm/card1
+/sys/class/drm/card1-HDMI-A-1
+/sys/class/drm/card1-VGA-1
+/sys/class/drm/renderD128
+/sys/class/drm/version

@@ -295,15 +295,20 @@ reserves a registry slot before probe cleanup, and disables the PCI device
 before releasing its regions. Remove-path adapter failure with provider success
 now clears `provider_ready`, so retry cannot call `provider_fini()` on an
 inactive provider. QEMU EDU remains virtual-device evidence; probe-failure
-retention is test-only and is not a production PCI probe pattern. No physical
-Haswell evidence or Stage 3C closure is claimed. See
+retention is test-only and is not a production PCI probe pattern. The D2 pass
+did not itself include physical Haswell evidence; Check 15 was collected
+separately on 2026-11-21. Stage 3C closure is not claimed. See
 `docs/design/STAGE3C_D2_OWNERSHIP_REMEDIATION_REPORT.md` and
 `tests/qemu-dma/d2-ownership-remediation-final-2026-11-21/`. The D2 pass was
 merged as PR #7 (`4512e95`).
 
-**Physical Haswell evidence attempt:** `tests/physical/haswell-evidence.sh`
-and `make physical-evidence` perform the read-only Check 15 checks. The current
-Google Compute Engine VM reports `TARGET_GPU_NOT_PRESENT`: no
-`0000:00:02.0`, no `/dev/dri`, no `i915`, no IOMMU groups, and no
-`/dev/vfio`. This is evidence of absence, not physical Haswell evidence. See
-`docs/design/STAGE3C_PHYSICAL_EVIDENCE_RUNBOOK.md`.
+**Physical Haswell evidence (Check 15): PASS.** `tests/physical/haswell-evidence.sh`
+and `make physical-evidence` performed the read-only Check 15 checks on a
+bare-metal Arch Linux host: Intel Core i5-4460, ASUS B85, `0000:00:02.0`
+`8086:0412`, `i915` bound, and `/dev/dri/renderD128` present. Raw evidence is
+in `tests/physical/evidence-2026-11-21-host/`. The earlier Google Compute
+Engine VM attempt remains recorded as `TARGET_GPU_NOT_PRESENT`; that was
+evidence of absence, not physical evidence. This PASS satisfies the missing
+Check 15 binding evidence only. It does not prove IDW-owned GGTT, MMIO, PPGTT
+activation, GPU submission, or independent Haswell execution, and Stage 3C is
+still not closed. See `docs/design/STAGE3C_PHYSICAL_EVIDENCE_RUNBOOK.md`.

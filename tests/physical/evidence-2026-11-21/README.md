@@ -9,6 +9,10 @@ container has no IOMMU groups or `/dev/vfio`.
 This is evidence of absence only. It does **not** close Stage 3C and does
 **not** demonstrate physical Haswell operation.
 
+> **Later update (2026-11-21):** a bare-metal Arch Linux host run passed
+> Check 15. See `tests/physical/evidence-2026-11-21-host/`. Stage 3C remains
+> open for the remaining checks.
+
 | File | SHA-256 |
 |---|---|
 | `environment.log` | `70da7ed8b78cc2c697c67ea9a057868640f9170cb16f1120633253ea9227330e` |
