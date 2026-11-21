@@ -103,11 +103,14 @@ IDW_QEMU_DMA: PASS: probe, page-table DMA, 32 DMA cycles, cleanup and remove com
 QEMU exit status: 33
 ```
 
-The D2 ownership-aware probe-failure evidence is in
-`tests/qemu-dma/d2-ownership-remediation-2026-11-21/`. Its
+The final D2 ownership-aware probe-failure evidence is in
+`tests/qemu-dma/d2-ownership-remediation-final-2026-11-21/`. Its
 `qemu-dma-probe-failure.log` records two `QUARANTINED` owner retries, PCI
 state `enabled=1 regions=1 master=1 bar=1` while the provider is blocked, and
-subsequent cleanup to all zero before `owner_count` reaches zero.
+subsequent cleanup to all zero before `owner_count` reaches zero. The earlier
+`d2-ownership-remediation-2026-11-21/` directory is retained as historical
+evidence; the final directory adds PCI device pinning, corrected PCI cleanup
+order, registry-slot reservation, and the remove-path provider-state fix.
 
 The full second-pass serial log is
 `tests/qemu-dma/evidence-2026-11-20-stage3c-remediation-pass2.log` (SHA-256

@@ -1,0 +1,16 @@
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	src/ggtt_allocator.c tests/ggtt-allocator-test.c \
+	-o build/ggtt-allocator-test
+./build/ggtt-allocator-test
+PASS: GGTT allocator, residency, binding, and teardown tests
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	src/ggtt_allocator.c src/haswell_gtt_hw.c src/ggtt_directory.c \
+	src/page_table_memory.c src/haswell_ppgtt_model.c \
+	tests/haswell-gtt-hw-test.c -o build/haswell-gtt-hw-test
+./build/haswell-gtt-hw-test
+PASS: Haswell GGTT directory, hardware sequence, and rollback tests
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	src/device_lifecycle.c tests/device-lifecycle-test.c \
+	-o build/device-lifecycle-test
+./build/device-lifecycle-test
+PASS: independent-device ownership, teardown, and recovery tests

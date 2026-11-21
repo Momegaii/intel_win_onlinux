@@ -989,3 +989,37 @@ Evidence: `tests/qemu-dma/evidence-2026-11-20-native-dma-backend.log`.
 The page directory is anonymous user memory and the page walk is the CPU
 model. No physical Haswell DMA, MMIO, BAR, or i915 ownership change occurred;
 i915 remains bound on the host.
+
+### Stage 3C D2 final ownership lifetime corrections
+
+Inspected the full project syntax and build surface, then corrected the
+remaining D2 ownership lifetime defects found by the kernel documentation
+review:
+
+- Retained owners now hold a `pci_dev_get()` reference and release it from the
+  kref release callback.
+- PCI cleanup disables the device before releasing its regions.
+- Remove-path adapter failure with provider success now clears
+  `provider_ready` and records `provider_cleanup_done`, preventing a permanent
+  `-EINVAL` retry loop.
+- Probe reserves a bounded registry slot before cleanup; insertion consumes it
+  and owner release returns it.
+- Synthetic lifecycle registration now happens after its dependencies exist.
+- Probe-failure retention is documented as a QEMU EDU test-only quarantine.
+
+Validation:
+
+```text
+Kernel W=1 build: PASS
+Software test group: PASS
+PPGTT model test: PASS
+Stage 3A test: PASS
+Stage 3A ASan/UBSan: PASS
+QEMU normal: PASS, exit 33
+QEMU probe failure: PASS, exit 33, two rounds
+make test: stops only at the pre-existing no-Intel-render-node smoke check
+```
+
+Evidence: `tests/qemu-dma/d2-ownership-remediation-final-2026-11-21/`.
+No physical Haswell operation, i915 unbind, MMIO, or Stage 3C closure is
+claimed.

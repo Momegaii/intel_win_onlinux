@@ -353,9 +353,13 @@ PASS: QEMU EDU performed device-side DMA read/write, page-table DMA visibility, 
 
 The line `remove freed outstanding provider allocations=yes result=0` is evidence that the test intentionally frees outstanding allocations during removal. The audit treats this as a safety defect, not a success criterion.
 
-### 5.11 QEMU fault injection — unavailable
+### 5.11 QEMU fault injection — unavailable at audit time
 
-There is no QEMU fault-injection target or mode. The only QEMU target is:
+> D2 follow-up (2026-11-21): a probe-failure mode now exists
+> (`tests/qemu-dma/run.sh --probe-failure`). This section remains the historical
+> audit record and does not cover the full failure matrix.
+
+There is no QEMU fault-injection target or mode at audit time. The only QEMU target was:
 
 ```text
 qemu-dma-test:

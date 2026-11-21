@@ -252,3 +252,16 @@ memory-manager-test gpu-submission-test` passed, and `make kernel CC=gcc` built
 all three modules. This is page-table storage and QEMU virtual-DMA evidence
 only: no hardware page-table publication, GPU invalidation, VM activation, resource
 mapping, MMIO, physical Haswell DMA, or independent GPU ownership is claimed.
+
+2026-11-21 Stage 3C D2 final lifetime corrections: the QEMU EDU test module
+now pins a retained owner's PCI device with `pci_dev_get()`/`pci_dev_put()`,
+disables the PCI device before releasing its regions, clears provider state
+when adapter finalization fails but provider finalization succeeds, and
+reserves a bounded registry slot before probe cleanup. The synthetic owner
+lifecycle registers only after its dependencies exist. Probe-failure retention
+is explicitly a QEMU EDU test-only quarantine; production probe failure must
+release all resources. Kernel `W=1`, software tests, Stage 3A, ASan/UBSan,
+QEMU normal, and QEMU `--probe-failure` pass; `make test` still stops at the
+pre-existing no-Intel-render-node smoke check. Evidence:
+`tests/qemu-dma/d2-ownership-remediation-final-2026-11-21/`. No physical
+Haswell operation, i915 unbind, MMIO, or Stage 3C closure is claimed.

@@ -39,6 +39,11 @@ The governing invariant is now:
   PCI resources, registry reference, owner reference.
 - No new mappings, bindings, or allocations are accepted after cleanup starts.
 
+This probe-failure retention is a QEMU EDU test-only quarantine. It is not a
+production PCI probe pattern. A production driver must release all resources
+before returning a failed probe; this module retains them only so the harness
+can prove reachable recovery.
+
 ## 2. Owner lifecycle
 
 The implementation uses `enum idw_edu_owner_state`:
@@ -61,8 +66,10 @@ new work and checking dependencies.
 `struct idw_edu_test` now contains:
 
 - `struct kref refs` for owner lifetime.
-- `struct list_head registry_link`, `u64 owner_id`, `registered`, and
-  `module_ref`.
+- `struct list_head registry_link`, `u64 owner_id`, `registered`,
+  `registry_reserved`, and `module_ref`.
+- `pci_dev_get()` ownership of the retained owner's `struct pci_dev`, released
+  with `pci_dev_put()` from the kref release callback.
 - `lifecycle_lock` to serialize cleanup and state changes.
 - PCI ownership flags `pci_enabled`, `pci_regions`, `pci_master`, and
   `bar_mapped`.
@@ -70,11 +77,14 @@ new work and checking dependencies.
   `provider_cleanup_done`, and `pci_cleanup_done`.
 
 The registry is `LIST_HEAD(idw_edu_owners)` protected by
-`idw_edu_registry_lock`. It is bounded by `IDW_EDU_MAX_OWNERS` (8). A probe is
-rejected with `-EBUSY` before allocation when the registry is full.
-`idw_edu_registry_add()` takes a `kref` and a module reference, so a retained
-owner remains reachable and prevents module unload. Registry removal drops the
-registry reference only after the owner has reached `RELEASED`.
+`idw_edu_registry_lock`. It is bounded by `IDW_EDU_MAX_OWNERS` (8). A probe
+reserves a registry slot before PCI setup and cleanup, so a failed probe cannot
+lose the slot between a refused finalization and registry insertion.
+`idw_edu_registry_add()` consumes that reservation, takes a `kref`, and takes a
+module reference, so a retained owner remains reachable and prevents module
+unload. Registry removal drops the registry reference only after the owner has
+reached `RELEASED`. If an owner is released without ever being registered, the
+reservation is returned.
 
 The module exposes read-only diagnostics:
 
@@ -98,8 +108,10 @@ The worker holds a temporary module reference while it runs.
 2. `idw_dma_pt_adapter_fini()`. A refusal keeps the owner quarantined.
 3. `idw_dma_provider_fini()` through `idw_edu_provider_fini_checked()`. A
    refusal keeps the owner quarantined and preserves PCI state.
-4. `idw_edu_pci_cleanup()`: clear bus master, unmap BAR, release regions, and
-   disable the PCI device.
+4. `idw_edu_pci_cleanup()`: clear bus master, unmap BAR, disable the PCI
+   device, and then release its regions. This follows the kernel PCI guide:
+   `pci_iounmap()` then `pci_disable_device()`, and
+   `pci_release_regions()` after `pci_disable_device()`.
 5. `idw_edu_registry_remove()` and the owner reference drop.
 
 The PCI cleanup is deliberately unreachable until adapter and provider
@@ -109,8 +121,11 @@ then logs PCI cleanup only after the injected page is released.
 
 The old `remove()` path was also corrected: it no longer clears
 `provider_ready` after a refused finalization, and it registers a quarantined
-owner instead of dropping the last reachable pointer. A successful remove uses
-the same PCI cleanup flags and ordered cleanup.
+owner instead of dropping the last reachable pointer. When adapter
+finalization fails but provider finalization succeeds, it now clears
+`provider_ready` and sets `provider_cleanup_done`, so the retry does not call
+`idw_dma_provider_fini()` on an already-inactive provider. A successful remove
+uses the same PCI cleanup flags and ordered cleanup.
 
 ## 5. Actual probe-failure regression
 
@@ -140,7 +155,8 @@ refusals, releases each dependency, and verifies final `RELEASED` with
 ## 6. Verification
 
 Evidence is in
-`tests/qemu-dma/d2-ownership-remediation-2026-11-21/`.
+`tests/qemu-dma/d2-ownership-remediation-final-2026-11-21/`. The directory
+README records exit codes and SHA-256 hashes for every log.
 
 | Command | Exit | Result |
 |---|---:|---|
@@ -190,4 +206,21 @@ IDW_QEMU_DMA: PASS: probe failure cleanup, quarantine, retry, repeated owner rel
 | `kernel/idw_edu_dma_test_main.c` | Lifecycle states, kref registry, bounded retries, ordered cleanup, PCI flags, diagnostics, actual probe-failure injection. |
 | `tests/qemu-dma/guest_init.c` | Kernel command-line probe-failure mode, owner-count wait, two failure/recovery rounds. |
 | `tests/qemu-dma/run.sh` | `--probe-failure` mode and evidence assertions. |
-| `tests/qemu-dma/d2-ownership-remediation-2026-11-21/` | Logs, exit codes, and README. |
+| `tests/qemu-dma/d2-ownership-remediation-final-2026-11-21/` | Final logs, exit codes, hashes, and README. |
+
+## 9. Final follow-up corrections
+
+After the first D2 report, a syntax and lifetime review found four additional
+defects. They are corrected and covered by the final QEMU evidence:
+
+| Defect | Correction |
+|---|---|
+| `pci_dev` was not independently pinned for a retained owner. | `pci_dev_get()` in probe and `pci_dev_put()` in the kref release callback. |
+| PCI cleanup released regions before disabling the device. | `pci_disable_device()` before `pci_release_regions()`. |
+| Remove-path adapter failure plus provider success left `provider_ready` set on an inactive provider. | Clear `provider_ready` and set `provider_cleanup_done` after successful provider finalization. |
+| Registry insertion could fail after cleanup refusal. | Reserve a registry slot before PCI setup; consume it on insertion or release it on owner release. |
+
+The synthetic owner lifecycle test now inserts its owner after its adapter,
+page-table page, and resource exist, eliminating the retry-worker setup race.
+The probe-failure quarantine comment now states the test-only boundary next to
+the `fail_provider` label.
