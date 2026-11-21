@@ -50,6 +50,8 @@ struct idw_dma_resource_page {
 	void *cpu_address;
 	dma_addr_t dma_address;
 	u64 mapping_cookie;
+	bool unmapped;
+	bool freed;
 };
 
 /*
@@ -67,6 +69,8 @@ struct idw_dma_resource {
 	atomic_t mappings;
 	enum dma_data_direction direction;
 	struct idw_dma_resource_page *pages;
+	bool dma_unmapped;
+	bool pages_released;
 };
 
 /*
@@ -98,6 +102,9 @@ struct idw_dma_provider {
 	bool removal_blocked;
 	s32 fail_alloc_at;
 	s32 fail_map_at;
+	bool fail_unmap;
+	bool fail_free;
+	bool fail_free_pt;
 };
 
 struct idw_dma_provider_stats {

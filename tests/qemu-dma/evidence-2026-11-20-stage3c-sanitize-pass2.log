@@ -1,0 +1,19 @@
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude -O1 -g \
+	-fsanitize=address,undefined -fno-omit-frame-pointer \
+	src/ggtt_allocator.c tests/ggtt-allocator-test.c \
+	-o build/sanitize/ggtt-allocator-test
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude -O1 -g \
+	-fsanitize=address,undefined -fno-omit-frame-pointer \
+	src/device_lifecycle.c tests/device-lifecycle-test.c \
+	-o build/sanitize/device-lifecycle-test
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude -O1 -g \
+	-fsanitize=address,undefined -fno-omit-frame-pointer \
+	src/ggtt_allocator.c src/haswell_gtt_hw.c src/ggtt_directory.c \
+	src/page_table_memory.c src/haswell_ppgtt_model.c \
+	tests/haswell-gtt-hw-test.c -o build/sanitize/haswell-gtt-hw-test
+ASAN_OPTIONS=detect_leaks=1 ./build/sanitize/ggtt-allocator-test
+PASS: GGTT allocator, residency, binding, and teardown tests
+ASAN_OPTIONS=detect_leaks=1 ./build/sanitize/device-lifecycle-test
+PASS: independent-device ownership, teardown, and recovery tests
+ASAN_OPTIONS=detect_leaks=1 ./build/sanitize/haswell-gtt-hw-test
+PASS: Haswell GGTT directory, hardware sequence, and rollback tests

@@ -809,12 +809,78 @@ static int test_page_table_sync_failure(void)
     return 0;
 }
 
+static int test_sync_retry_after_failure(void)
+{
+    struct fake_page_allocator allocator = {
+        .next_dma = 0x0b000000,
+        .sync_fail_call = 2
+    };
+    struct fake_directory fake;
+    struct idw_hsw_ppgtt_model *model = NULL;
+    const struct idw_dma_page_mapping page[] = {
+        TEST_DMA_PAGE(0xb0000000)
+    };
+    bool cleared = false;
+
+    fake_directory_init(&fake);
+    CHECK(create_model(&model, &allocator, &fake) == 0);
+    CHECK(idw_hsw_ppgtt_map(model, 0, 4096, page, 1) == -EIO);
+    CHECK(idw_hsw_ppgtt_check_submit(model) == -EIO);
+    CHECK(idw_hsw_ppgtt_range_cleared(model, 0, 4096, &cleared) == 0);
+    CHECK(!cleared);
+    CHECK(idw_hsw_ppgtt_retry_sync(model) == 0);
+    CHECK(idw_hsw_ppgtt_set_active(model, true) == 0);
+    CHECK(idw_hsw_ppgtt_check_submit(model) == 0);
+    CHECK(idw_hsw_ppgtt_unmap(model, 0, 4096) == 0);
+    CHECK(idw_hsw_ppgtt_range_cleared(model, 0, 4096, &cleared) == 0);
+    CHECK(cleared);
+    CHECK(drain_invalidation(model) == 0);
+    CHECK(idw_hsw_ppgtt_set_active(model, false) == 0);
+    CHECK(idw_hsw_ppgtt_model_destroy_checked(model, false) == 0);
+    CHECK(allocator.allocated == allocator.freed);
+    return 0;
+}
+
+static int test_unmap_sync_failure_retry(void)
+{
+    struct fake_page_allocator allocator = { .next_dma = 0x0c000000 };
+    struct fake_directory fake;
+    struct idw_hsw_ppgtt_model *model = NULL;
+    struct idw_hsw_ppgtt_pending_invalidation pending = {
+        .size = sizeof(pending)
+    };
+    const struct idw_dma_page_mapping page[] = {
+        TEST_DMA_PAGE(0xc0000000)
+    };
+    bool cleared = false;
+
+    fake_directory_init(&fake);
+    CHECK(create_model(&model, &allocator, &fake) == 0);
+    CHECK(idw_hsw_ppgtt_map(model, 0, 4096, page, 1) == 0);
+    CHECK(drain_invalidation(model) == 0);
+    allocator.sync_fail_call = (unsigned)allocator.syncs + 1;
+    CHECK(idw_hsw_ppgtt_unmap(model, 0, 4096) == -EIO);
+    CHECK(idw_hsw_ppgtt_range_cleared(model, 0, 4096, &cleared) == 0);
+    CHECK(cleared);
+    CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
+    CHECK(pending.pending);
+    CHECK(idw_hsw_ppgtt_retry_sync(model) == 0);
+    CHECK(idw_hsw_ppgtt_pending(model, &pending) == 0);
+    CHECK(pending.pending);
+    CHECK(idw_hsw_ppgtt_invalidation_complete(model, pending.generation) == 0);
+    CHECK(idw_hsw_ppgtt_model_destroy_checked(model, false) == 0);
+    CHECK(allocator.allocated == allocator.freed);
+    return 0;
+}
+
 int main(void)
 {
     if (test_gpuva_space() || test_golden_encoding() ||
         test_geometry_and_lifecycle() || test_invalid_maps_and_rollback() ||
         test_failed_invalidation_poison() ||
         test_page_table_sync_failure() ||
+        test_sync_retry_after_failure() ||
+        test_unmap_sync_failure_retry() ||
         test_invalidation_generation_coalescing() ||
         test_directory_residency_and_writes() ||
         test_directory_validation() || test_reclaim_failure_rollback() ||

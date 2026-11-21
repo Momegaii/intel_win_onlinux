@@ -43,13 +43,26 @@ public:
         uint64_t quarantined_pages = 0;
     };
 
+    struct TeardownProgress {
+        bool ptes_cleared = false;
+        bool ptes_accounted = false;
+        bool invalidation_done = false;
+        bool va_released = false;
+        bool dma_unmapped = false;
+        bool backing_released = false;
+        bool complete = false;
+    };
+
     struct FaultPlan {
         int create_fail_at = -1;
         int page_table_fail_at = -1;
         bool sync_page_table_fail = false;
         bool bind_fail_after_map = false;
         bool unbind_fail_invalidation = false;
+        bool unbind_fail_sync = false;
         bool destroy_fail = false;
+        bool destroy_fail_after_unmap = false;
+        bool free_page_table_fail = false;
         bool mmap_fail = false;
     };
 
@@ -73,6 +86,7 @@ public:
     size_t page_table_count() const;
     OwnershipCounters counters() const;
     int allocation_state(uint64_t backing, ResourceState& state) const;
+    int teardown_progress(uint64_t backing, TeardownProgress& progress) const;
     void set_fault_plan(const FaultPlan& plan);
 
 private:
@@ -84,6 +98,11 @@ private:
         void *address;
         bool bound;
         bool ptes_cleared;
+        bool ptes_accounted;
+        bool invalidation_done;
+        bool va_released;
+        bool dma_unmapped;
+        bool backing_released;
         bool release_safe;
         idw_gpuva va;
         ResourceState state = ResourceState::New;
@@ -99,6 +118,7 @@ private:
         void *address;
         bool unmapped = false;
         bool quarantined = false;
+        bool released = false;
     };
 
     struct Directory {
@@ -137,6 +157,7 @@ private:
                                 uint32_t value);
     int alloc_page_table_page(struct idw_dma_page *page);
     void free_page_table_page(struct idw_dma_page *page);
+    int release_remaining_page_tables();
     int sync_page_table_for_device(const struct idw_dma_page *page,
                                    uint32_t offset, uint32_t bytes);
     int alloc_directory(struct idw_hsw_ppgtt_directory *directory);

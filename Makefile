@@ -205,7 +205,7 @@ gpu-resource-write-test: all
 qemu-dma-test:
 	./tests/qemu-dma/run.sh
 kernel:
-	$(MAKE) -C $(KDIR) M=$(CURDIR)/kernel modules
+	$(MAKE) -C $(KDIR) M=$(CURDIR)/kernel CC=$(CC) modules
 kernel-clean:
 	$(MAKE) -C $(KDIR) M=$(CURDIR)/kernel clean
 clean:

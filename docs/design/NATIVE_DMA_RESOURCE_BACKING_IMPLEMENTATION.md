@@ -115,8 +115,9 @@ Result: `QEMU exit status: 33` (isa-debug-exit success). The guest log contains:
 ```text
 IDW_QEMU_DMA: 3-page resource backing DMA, 39-bit validation, PPGTT PTE consumption, sync, and cleanup verified
 IDW_QEMU_DMA: backing allocation/mapping fault injection verified
+IDW_QEMU_DMA: provider removal refused outstanding refs and recovered after release
 PASS: native DMA backing, real DMA addresses, PPGTT translation, submission, and cleanup
-PASS: native DMA backend fault injection, retry, and ownership counters
+PASS: native DMA backend fault injection, teardown retry, VMA lifetime, and ownership counters
 IDW_QEMU_DMA: remove released all provider resources result=0
 IDW_QEMU_DMA: PASS: probe, page-table DMA, 32 DMA cycles, cleanup and remove completed
 ```

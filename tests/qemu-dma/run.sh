@@ -116,8 +116,9 @@ if [[ $QEMU_STATUS -eq 33 ]] &&
    grep -q 'IDW_QEMU_DMA: page-table DMA layout verified' "$LOG" &&
    grep -q 'IDW_QEMU_DMA: 3-page resource backing DMA, 39-bit validation, PPGTT PTE consumption, sync, and cleanup verified' "$LOG" &&
    grep -q 'IDW_QEMU_DMA: backing allocation/mapping fault injection verified' "$LOG" &&
+   grep -q 'IDW_QEMU_DMA: provider removal refused outstanding refs and recovered after release' "$LOG" &&
    grep -q 'PASS: native DMA backing, real DMA addresses, PPGTT translation, submission, and cleanup' "$LOG" &&
-   grep -q 'PASS: native DMA backend fault injection, retry, and ownership counters' "$LOG" &&
+   grep -q 'PASS: native DMA backend fault injection, teardown retry, VMA lifetime, and ownership counters' "$LOG" &&
    grep -q 'IDW_QEMU_DMA: PASS: probe, page-table DMA, 32 DMA cycles, cleanup and remove completed' "$LOG"; then
     printf 'PASS: QEMU EDU performed device-side DMA read/write, page-table DMA visibility, resource backing DMA, and provider removal cleanup.\n'
     exit 0

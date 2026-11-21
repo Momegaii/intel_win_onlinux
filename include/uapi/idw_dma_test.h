@@ -87,11 +87,15 @@ struct idw_dma_test_stats {
 	__u32 removal_blocked;
 };
 
+#define IDW_DMA_TEST_FAULT_UNMAP 0x1u
+#define IDW_DMA_TEST_FAULT_FREE 0x2u
+#define IDW_DMA_TEST_FAULT_FREE_PT 0x4u
+
 struct idw_dma_test_fault {
 	__u32 size;
 	__s32 alloc_fail_at;
 	__s32 map_fail_at;
-	__u32 reserved;
+	__u32 flags;
 };
 
 #define IDW_DMA_TEST_IOCTL_ALLOC \

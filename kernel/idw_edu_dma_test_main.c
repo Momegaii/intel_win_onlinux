@@ -38,6 +38,7 @@
 #define IDW_EDU_DMA_CYCLES 32
 
 struct idw_edu_test {
+	struct device *dev;
 	void __iomem *bar;
 	struct idw_dma_provider provider;
 	struct idw_dma_pt_adapter pt_adapter;
@@ -656,6 +657,65 @@ out:
 }
 
 
+static int idw_edu_test_provider_removal(struct idw_edu_test *test)
+{
+	struct idw_dma_provider local = {};
+	struct idw_dma_resource resource = {};
+	struct idw_dma_page_info page = {};
+	int ret;
+
+	ret = idw_dma_provider_init(&local, test->dev, THIS_MODULE, 1);
+	if (ret)
+		return ret;
+	ret = idw_dma_resource_alloc(&local, PAGE_SIZE, DMA_BIDIRECTIONAL,
+				     &resource);
+	if (ret)
+		goto fini;
+	atomic_inc(&local.vma_refs);
+	ret = idw_dma_provider_fini(&local);
+	if (ret != -EBUSY) {
+		ret = -EIO;
+		goto free_resource;
+	}
+	atomic_dec(&local.vma_refs);
+	ret = idw_dma_resource_free(&local, &resource);
+	if (ret)
+		goto fini;
+	ret = idw_dma_provider_fini(&local);
+	if (ret)
+		return ret;
+
+	memset(&local, 0, sizeof(local));
+	ret = idw_dma_provider_init(&local, test->dev, THIS_MODULE, 2);
+	if (ret)
+		return ret;
+	ret = idw_dma_page_alloc(&local, &page);
+	if (ret)
+		goto fini;
+	ret = idw_dma_provider_fini(&local);
+	if (ret != -EBUSY) {
+		ret = -EIO;
+		goto free_page;
+	}
+	ret = idw_dma_page_free(&local, &page);
+	if (ret)
+		goto fini;
+	ret = idw_dma_provider_fini(&local);
+	if (ret)
+		return ret;
+	pr_info("IDW_QEMU_DMA: provider removal refused outstanding refs and recovered after release\n");
+	return 0;
+
+free_page:
+	(void)idw_dma_page_free(&local, &page);
+	goto fini;
+free_resource:
+	(void)idw_dma_resource_free(&local, &resource);
+fini:
+	(void)idw_dma_provider_fini(&local);
+	return ret;
+}
+
 static struct idw_dma_resource *
 idw_edu_find_resource(struct idw_edu_test *test, u64 cookie)
 {
@@ -706,8 +766,8 @@ static void idw_edu_vma_put(struct idw_dma_provider *provider)
 {
         if (!provider)
                 return;
-        if (atomic_read(&provider->vma_refs))
-                atomic_dec(&provider->vma_refs);
+        if (atomic_dec_if_positive(&provider->vma_refs) < 0)
+                return;
         module_put(THIS_MODULE);
 }
 
@@ -730,8 +790,7 @@ static void idw_edu_resource_vm_close(struct vm_area_struct *vma)
 
         if (!resource)
                 return;
-        if (atomic_read(&resource->mappings))
-                atomic_dec(&resource->mappings);
+        (void)atomic_dec_if_positive(&resource->mappings);
         idw_edu_vma_put(resource->provider);
 }
 
@@ -759,8 +818,7 @@ static void idw_edu_pt_vm_close(struct vm_area_struct *vma)
 
         if (!page)
                 return;
-        if (atomic_read(&page->mappings))
-                atomic_dec(&page->mappings);
+        (void)atomic_dec_if_positive(&page->mappings);
         idw_edu_vma_put(page->provider);
 }
 
@@ -1111,11 +1169,20 @@ static long idw_edu_ioctl_locked(struct file *file, unsigned int cmd,
                         return -EFAULT;
                 if (request.size != sizeof(request))
                         return -EINVAL;
-                if (request.alloc_fail_at < -1 || request.map_fail_at < -1)
+                if (request.alloc_fail_at < -1 || request.map_fail_at < -1 ||
+                    (request.flags & ~(IDW_DMA_TEST_FAULT_UNMAP |
+                                       IDW_DMA_TEST_FAULT_FREE |
+                                       IDW_DMA_TEST_FAULT_FREE_PT)))
                         return -EINVAL;
                 mutex_lock(&test->provider.lock);
                 test->provider.fail_alloc_at = request.alloc_fail_at;
                 test->provider.fail_map_at = request.map_fail_at;
+                test->provider.fail_unmap =
+                        request.flags & IDW_DMA_TEST_FAULT_UNMAP;
+                test->provider.fail_free =
+                        request.flags & IDW_DMA_TEST_FAULT_FREE;
+                test->provider.fail_free_pt =
+                        request.flags & IDW_DMA_TEST_FAULT_FREE_PT;
                 mutex_unlock(&test->provider.lock);
                 return 0;
         }
@@ -1160,6 +1227,7 @@ static int idw_edu_probe(struct pci_dev *pdev,
 	test = kzalloc(sizeof(*test), GFP_KERNEL);
 	if (!test)
 		return -ENOMEM;
+	test->dev = &pdev->dev;
 	ret = pci_enable_device_mem(pdev);
 	if (ret)
 		goto fail_state;
@@ -1213,6 +1281,9 @@ static int idw_edu_probe(struct pci_dev *pdev,
 		goto fail_provider;
 
 	ret = idw_edu_test_resource_backing(test);
+	if (ret)
+		goto fail_provider;
+	ret = idw_edu_test_provider_removal(test);
 	if (ret)
 		goto fail_provider;
 
