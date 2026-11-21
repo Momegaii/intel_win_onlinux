@@ -5,7 +5,8 @@
 **Implementation commit:** `c9598ef9c094b1c54ed681a94debec64b43dd7c9`
 **Date:** 2026-11-21 UTC
 **Status:** **D1/D2 REMEDIATED — READY FOR INDEPENDENT REVIEW**
-**Stage 3C closure:** **NOT CLAIMED** — Check 15 physical Haswell evidence remains unavailable.
+**Stage 3C closure:** **NOT CLAIMED** — Check 15 physical Haswell evidence was unavailable at report time. It was subsequently collected on 2026-11-21 from a bare-metal host; see `tests/physical/evidence-2026-11-21-host/`. Stage 3C remains open for the remaining checks.
+
 
 > **D2 follow-up:** The probe-failure retention described in section 2 was
 > incomplete. It retained an unreachable owner and still tore down PCI
@@ -232,9 +233,10 @@ No unrelated source, build-system, UAPI, or hardware-path file changed.
 
 ## 6. Remaining limitations
 
-- **Check 15 is still INSUFFICIENT EVIDENCE.** The host has no `8086:0412`
-  Haswell GPU, no `/dev/dri`, and no i915 binding. QEMU EDU is virtual-device
-  DMA only; it is not physical Haswell evidence.
+- **Check 15 was INSUFFICIENT EVIDENCE at report time.** The report host had
+  no `8086:0412` Haswell GPU, no `/dev/dri`, and no i915 binding. QEMU EDU is
+  virtual-device DMA only. A later read-only bare-metal host run returned
+  `PASS`; see `tests/physical/evidence-2026-11-21-host/`.
 - **Full `make test` is not green in this container** because no Intel render
   node exists. This is not caused by D1/D2.
 - **D2 retained owner is a deliberate quarantine on probe failure.** If probe

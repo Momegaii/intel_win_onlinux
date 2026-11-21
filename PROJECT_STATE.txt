@@ -269,13 +269,20 @@ Haswell operation, i915 unbind, MMIO, or Stage 3C closure is claimed.
 2026-11-21 physical Haswell evidence attempt: added a read-only Check 15
 collector (`tests/physical/haswell-evidence.sh`, `make physical-evidence`)
 that records target `0000:00:02.0`, vendor/device `8086:0412`, i915 binding,
-and `/dev/dri/renderD128`. The current Google Compute Engine VM reports
-`TARGET_GPU_NOT_PRESENT`: no target PCI device, no `/dev/dri`, no i915, no
-IOMMU groups, no `/dev/vfio`; `modprobe i915` is denied by container
-capabilities. This is evidence of absence, not physical Haswell evidence.
-Stage 3C remains open. See
-`docs/design/STAGE3C_PHYSICAL_EVIDENCE_RUNBOOK.md` and
-`tests/physical/evidence-2026-11-21/`.
+and `/dev/dri/renderD128`. The earlier Google Compute Engine VM attempt
+reported `TARGET_GPU_NOT_PRESENT`: no target PCI device, no `/dev/dri`, no
+i915, no IOMMU groups, no `/dev/vfio`; `modprobe i915` is denied by container
+capabilities. This was evidence of absence, not physical Haswell evidence.
+
+2026-11-21 physical Haswell host run: the target bare-metal Arch Linux host
+(Intel Core i5-4460, ASUS B85) reported `0000:00:02.0`, vendor/device
+`0x8086:0x0412`, driver `i915`, and `/dev/dri/renderD128`, with
+`systemd-detect-virt=none`. The read-only collector returned `PASS` and the
+raw logs are recorded in `tests/physical/evidence-2026-11-21-host/`. This
+satisfies Check 15 binding evidence. It does not prove IDW-owned GGTT, MMIO,
+PPGTT activation, GPU submission, or independent Haswell execution; Stage 3C
+remains open for the remaining checks. See
+`docs/design/STAGE3C_PHYSICAL_EVIDENCE_RUNBOOK.md`.
 
 2026-11-21 read-only evidence API: `tools/idw-evidence-api.py` wraps the
 physical Haswell collector with a fixed `POST /collect` endpoint. It binds to

@@ -1,0 +1,13 @@
+0000:00:00.0 vendor=0x8086 device=0x0c00 class=0x060000 driver=hsw_uncore
+0000:00:01.0 vendor=0x8086 device=0x0c01 class=0x060400 driver=pcieport
+0000:00:02.0 vendor=0x8086 device=0x0412 class=0x030000 driver=i915
+0000:00:03.0 vendor=0x8086 device=0x0c0c class=0x040300 driver=snd_hda_intel
+0000:00:14.0 vendor=0x8086 device=0x8c31 class=0x0c0330 driver=xhci_hcd
+0000:00:16.0 vendor=0x8086 device=0x8c3a class=0x078000 driver=mei_me
+0000:00:19.0 vendor=0x8086 device=0x15a1 class=0x020000 driver=e1000e
+0000:00:1a.0 vendor=0x8086 device=0x8c2d class=0x0c0320 driver=ehci-pci
+0000:00:1b.0 vendor=0x8086 device=0x8c20 class=0x040300 driver=snd_hda_intel
+0000:00:1d.0 vendor=0x8086 device=0x8c26 class=0x0c0320 driver=ehci-pci
+0000:00:1f.0 vendor=0x8086 device=0x8c50 class=0x060100 driver=lpc_ich
+0000:00:1f.2 vendor=0x8086 device=0x8c02 class=0x010601 driver=ahci
+0000:00:1f.3 vendor=0x8086 device=0x8c22 class=0x0c0500 driver=i801_smbus

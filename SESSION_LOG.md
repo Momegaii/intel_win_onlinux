@@ -1041,3 +1041,18 @@ Added a fixed-command HTTP wrapper for the physical Haswell collector. It
 supports only `POST /collect`, returns the evidence logs as JSON, and does not
 expose a shell or accept arbitrary commands. Access is intended through
 Tailscale or a temporary tunnel; the server binds to localhost by default.
+
+
+### Stage 3C Check 15 physical evidence — PASS
+
+Ran the read-only Haswell evidence collector on the target bare-metal Arch
+Linux host through `tools/idw-evidence-api.py`. Host: Intel Core i5-4460,
+ASUS B85, kernel `7.3.5-arch1-1`, `systemd-detect-virt=none`. Target
+`0000:00:02.0` reported vendor/device `0x8086:0x0412`, driver `i915`, and
+`/dev/dri/renderD128`. Collector exit code 0; result `PASS`.
+
+Raw logs are in `tests/physical/evidence-2026-11-21-host/` with
+`SHA256SUMS`. The run did not unbind i915, map a BAR, perform MMIO, submit GPU
+work, activate PPGTT, or change PCI ownership. This satisfies Check 15 binding
+evidence only; Stage 3C closure is not claimed because the remaining checks
+still apply.

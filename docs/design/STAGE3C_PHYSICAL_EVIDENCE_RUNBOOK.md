@@ -1,6 +1,6 @@
 # Stage 3C physical Haswell evidence runbook
 
-**Status:** collection tooling added; physical evidence still unavailable.
+**Status:** Check 15 physical evidence collected 2026-11-21; Stage 3C remains open.
 
 Check 15 requires a read-only check on a host that exposes the Haswell GPU:
 
@@ -56,7 +56,27 @@ The collector writes:
 
 ## Current environment result
 
-The 2026-11-21 attempt ran in a Google Compute Engine VM:
+### 2026-11-21 bare-metal host — PASS
+
+The Check 15 run on the target host reported:
+
+- OS: Arch Linux
+- Kernel: `7.3.5-arch1-1`
+- CPU: Intel Core i5-4460 @ 3.20 GHz
+- Chipset: Intel B85
+- `systemd-detect-virt`: `none`
+- Target: `0000:00:02.0`
+- Vendor/device: `0x8086:0x0412`
+- Driver: `i915`
+- Render node: `/dev/dri/renderD128`
+- IOMMU groups: `0`
+
+Result: `PASS`. Evidence:
+`tests/physical/evidence-2026-11-21-host/`.
+
+### 2026-11-21 Google Compute Engine VM — TARGET_GPU_NOT_PRESENT
+
+The earlier attempt ran in a Google Compute Engine VM:
 
 - CPU: AMD EPYC 9B14
 - `systemd-detect-virt`: `container-other`
@@ -73,6 +93,8 @@ evidence of absence, not physical Haswell evidence.
 
 ## Closure rule
 
-Stage 3C can close only when a `PASS` summary and its raw logs are recorded
-from the target hardware. Do not close it from QEMU, emulated display
-adapters, synthetic PCI devices, or a host that does not expose the GPU.
+Check 15 is satisfied only by a `PASS` summary and raw logs from target
+hardware. Do not close it from QEMU, emulated display adapters, synthetic PCI
+devices, or a host that does not expose the GPU. The 2026-11-21 host run
+satisfies Check 15; it does not close Stage 3C, because the remaining
+lifecycle, failure-path, and physical execution checks still apply.

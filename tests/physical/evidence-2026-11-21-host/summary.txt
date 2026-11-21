@@ -1,0 +1,5 @@
+target_present=true
+target_vendor=0x8086
+target_device=0x0412
+target_driver=i915
+result=PASS

@@ -1,5 +1,10 @@
 # Change log
 
+## 2026-11-21 — Physical Haswell Check 15 evidence
+- Recorded a bare-metal Arch Linux host run: Intel Core i5-4460, ASUS B85, `0000:00:02.0` `8086:0412`, `i915` bound, `/dev/dri/renderD128` present.
+- Collector result: `PASS`; raw logs and SHA-256 checksums are in `tests/physical/evidence-2026-11-21-host/`.
+- This satisfies Check 15 binding evidence only. No unbind, MMIO, BAR mapping, GPU submission, PPGTT activation, or PCI ownership change was performed. Stage 3C remains open.
+
 ## 2026-11-21 — Read-only evidence API
 - Added `tools/idw-evidence-api.py`, a fixed-command HTTP wrapper around the physical Haswell evidence collector.
 - The API exposes only `POST /collect` and returns collector logs; it does not expose a shell, arbitrary commands, or GPU ownership operations.

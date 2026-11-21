@@ -9,7 +9,8 @@
 
 **Post-remediation status (2026-11-21):** D1 and D2 were fixed in commit
 `c9598ef9c094b1c54ed681a94debec64b43dd7c9`. Checks 2, 10, and 16 now pass;
-Check 15 remains **INSUFFICIENT EVIDENCE**. See
+Check 15 was subsequently satisfied by a read-only bare-metal host run
+(`tests/physical/evidence-2026-11-21-host/`). See
 `docs/design/STAGE3C_D1_D2_REMEDIATION_REPORT.md`. **Stage 3C is not closed.**
 
 > This is a verification report. No implementation source, test source, hardware state, Git history, or remote branch was changed during this pass.
@@ -102,12 +103,15 @@ Classifications:
 - **CPU_ONLY** — PPGTT model and other software-only tests.
 - **QEMU_EDU_DMA** — only the QEMU EDU TCG harness; this is virtual-device DMA.
 - **TARGET_GPU_NOT_PRESENT** — PCI device `8086:0412` is absent.
-- **PHYSICAL_I915_ASSISTED** — not available.
+- **PHYSICAL_I915_ASSISTED** — not available at report time; a later Check 15
+  host run recorded i915 binding, but no i915-assisted execution test.
 - **INDEPENDENT_PHYSICAL_HASWELL** — not available.
 
 QEMU EDU does not emulate the target Haswell GPU. The QEMU result is not
-physical Haswell evidence. Check 15 remains unresolved pending read-only
-evidence from a physical host showing the Haswell GPU and its `i915` binding.
+physical Haswell evidence. At report time, Check 15 was unresolved pending
+read-only evidence from a physical host showing the Haswell GPU and its
+`i915` binding. That binding evidence was subsequently collected; see
+`tests/physical/evidence-2026-11-21-host/`.
 
 ---
 
@@ -377,9 +381,9 @@ were not overwritten.
 | 12 | Provider removal with outstanding allocations | **PASS** (normal path) | `idw_dma_provider_fini()` refuses on pages/resources/VMA/counters (`kernel/idw_dma_memory.c:110-145`); probe refusal/recovery; QEMU `remove released all provider resources result=0`. | D1 can leave an allocation that cannot be released; this is a consequence tracked under Checks 2/10/16, not a failure of normal refusal. |
 | 13 | Inactive-hardware invariant | **PASS** | `quiesce_cb()` checks fence and `check_inactive()`; `close_all()` calls `check_inactive()` and destroys with `hardware_quiesced=false` (`src/native_dma_backend.cpp:700-710,1120-1160`). | No physical GPU. |
 | 14 | PPGTT evidence separation | **PASS** | QEMU log labels TCG; no physical Haswell claim; CPU-only PPGTT tests separate. | None beyond scope. |
-| 15 | GGTT and hardware execution boundary | **INSUFFICIENT EVIDENCE** | Hardware log: `8086:0412` absent, no `/dev/dri`, no i915, no target `0000:00:02.0`; source has no Haswell MMIO/BAR/GGTT/ring operation. | Must be rechecked read-only on a physical Haswell host with i915 binding. |
+| 15 | GGTT and hardware execution boundary | **PASS** (post-snapshot) | The snapshot host had `8086:0412` absent, no `/dev/dri`, and no i915; source has no Haswell MMIO/BAR/GGTT/ring operation. A later bare-metal host run recorded `0000:00:02.0`, `8086:0412`, `i915` bound, and `renderD128`. | Binding evidence is recorded; physical BAR/MMIO/GGTT/PPGTT/submission behavior remains untested. |
 | 16 | Failure-path evidence | **FAIL** | Fault tests cover create, PT alloc, mmap, sync, bind-after-map, unbind invalidation/sync, destroy, resource free, PT free, VMA cases. No test covers post-publication sync failure with an existing table; D1 is therefore unguarded. | Missing regression test; D1 confirmed by diagnostic harness. |
-| 17 | Evidence classification | **PASS** | `TARGET_GPU_NOT_PRESENT`, `CPU_ONLY`, `QEMU_EDU_DMA` classified; no `PHYSICAL_I915_ASSISTED` or `INDEPENDENT_PHYSICAL_HASWELL` claims. | Physical buckets remain empty. |
+| 17 | Evidence classification | **PASS** | `TARGET_GPU_NOT_PRESENT`, `CPU_ONLY`, `QEMU_EDU_DMA` classified; no `PHYSICAL_I915_ASSISTED` or `INDEPENDENT_PHYSICAL_HASWELL` claims. | Physical execution buckets remain empty; Check 15 binding evidence was recorded later. |
 
 ---
 
@@ -392,14 +396,17 @@ were not overwritten.
 - **Check 10** — recovery after that failure can corrupt another allocation's
   VA reservation and permanently block cleanup.
 - **Check 16** — no merged regression test reaches the failing branch.
-- **Check 15** — physical Haswell/i915 binding evidence is unavailable in this
-  container; `TARGET_GPU_NOT_PRESENT`.
+- **Check 15** — physical Haswell/i915 binding evidence was unavailable in the
+  audit container; `TARGET_GPU_NOT_PRESENT`. A later bare-metal host run
+  returned `PASS`; see `tests/physical/evidence-2026-11-21-host/`.
 
 ### 8.2 Recommendation
 
 **Original snapshot: NOT_READY_FOR_CLOSURE.** D1/D2 have since been remediated
 in `c9598ef`; see `docs/design/STAGE3C_D1_D2_REMEDIATION_REPORT.md`. Check 15
-remains insufficient, so Stage 3C is still not closed.
+binding evidence has since been collected from a bare-metal host, but Stage 3C
+is still not closed because the remaining lifecycle, failure-path, and
+physical-execution checks still apply.
 
 At the time of this snapshot, the merged implementation passed the normal
 software, PPGTT, sanitizer, and QEMU EDU paths, but D1 violated the Stage 3C
@@ -408,5 +415,6 @@ also a required-evidence gap. No code was changed during that verification, and
 no physical Haswell claim was made.
 
 Stage 3C must not be described as independently accepted or physically
-validated. Re-audit the D1/D2 remediation, then collect read-only physical-host
-evidence for Check 15.
+validated. Re-audit the D1/D2 remediation and close the remaining failure-path
+and physical-execution checks. The read-only Check 15 binding evidence is
+recorded in `tests/physical/evidence-2026-11-21-host/`.

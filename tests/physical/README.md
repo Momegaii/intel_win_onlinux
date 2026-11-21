@@ -25,5 +25,7 @@ make physical-evidence PHYSICAL_EVIDENCE_DIR=path/to/output
 Exit codes and result meanings are documented in
 `docs/design/STAGE3C_PHYSICAL_EVIDENCE_RUNBOOK.md`.
 
-A `TARGET_GPU_NOT_PRESENT` result is not physical evidence and cannot close
-Stage 3C.
+A `TARGET_GPU_NOT_PRESENT` result is not physical evidence and cannot satisfy
+Check 15. The 2026-11-21 bare-metal host run passed and is recorded in
+`evidence-2026-11-21-host/`. That PASS satisfies Check 15 only; Stage 3C
+remains open for the remaining checks.

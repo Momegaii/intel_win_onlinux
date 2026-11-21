@@ -1,0 +1,9 @@
+date_utc=2026-11-21T13:16:40Z
+uname=Linux archlinux 7.3.5-arch1-1 #1 SMP PREEMPT_DYNAMIC Tue, 17 Nov 2026 22:28:33 +0000 x86_64 GNU/Linux
+architecture=x86_64
+virtualization=none
+unknown
+hypervisor_type=none
+kernel_cmdline=initrd=\initramfs-linux.img root=PARTUUID=8a163c02-498e-4ea8-842e-c88480b12b23 zswap.enabled=0 rw rootfstype=ext4
+os=Arch Linux
+model name	: Intel(R) Core(TM) i5-4460  CPU @ 3.20GHz

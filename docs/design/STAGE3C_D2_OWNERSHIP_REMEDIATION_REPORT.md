@@ -4,7 +4,8 @@
 **Baseline:** `master` @ `730cba04979e1185bbf01b6a464c16cbbae930c6`
 **Date:** 2026-11-21 UTC
 **Status:** **D2 REMEDIATED — READY FOR INDEPENDENT REVIEW**
-**Stage 3C closure:** **NOT CLAIMED** — Check 15 physical Haswell evidence remains unavailable.
+**Stage 3C closure:** **NOT CLAIMED** — Check 15 physical Haswell evidence was unavailable at report time. It was subsequently collected on 2026-11-21 from a bare-metal host; see `tests/physical/evidence-2026-11-21-host/`. Stage 3C remains open for the remaining checks.
+
 
 This pass changes the QEMU EDU provider-owner lifetime, its QEMU regression
 harness, and evidence. It does not activate a physical GPU, unbind i915, access
@@ -188,8 +189,10 @@ IDW_QEMU_DMA: PASS: probe failure cleanup, quarantine, retry, repeated owner rel
 ## 7. Limitations
 
 - QEMU EDU is virtual-device evidence. It is not Haswell hardware evidence.
-- Check 15 physical Haswell/i915 evidence is unavailable in this container
-  (`TARGET_GPU_NOT_PRESENT`). Stage 3C closure is not claimed.
+- Check 15 physical Haswell/i915 evidence was unavailable in the report
+  container (`TARGET_GPU_NOT_PRESENT`). A later read-only bare-metal host run
+  returned `PASS`; see `tests/physical/evidence-2026-11-21-host/`. Stage 3C
+  closure is not claimed.
 - The current driver publishes one active EDU owner at a time. The registry
   supports multiple retained owners, but the QEMU harness tests one active
   device and repeated probe failures, not concurrent EDU devices.
