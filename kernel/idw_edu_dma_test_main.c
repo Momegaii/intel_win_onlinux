@@ -56,6 +56,18 @@ static int idw_edu_test_result = -EINPROGRESS;
 static int idw_edu_remove_result = -EINPROGRESS;
 module_param_named(test_result, idw_edu_test_result, int, 0444);
 
+static int idw_edu_provider_fini_checked(struct idw_edu_test *test)
+{
+        int ret;
+
+        if (!test || !test->provider_ready)
+                return 0;
+        ret = idw_dma_provider_fini(&test->provider);
+        if (!ret)
+                test->provider_ready = false;
+        return ret;
+}
+
 static int idw_edu_dma_wait(struct idw_edu_test *test)
 {
 	u32 command;
@@ -659,60 +671,67 @@ out:
 
 static int idw_edu_test_provider_removal(struct idw_edu_test *test)
 {
-	struct idw_dma_provider local = {};
+	struct idw_edu_test local = {};
 	struct idw_dma_resource resource = {};
 	struct idw_dma_page_info page = {};
 	int ret;
 
-	ret = idw_dma_provider_init(&local, test->dev, THIS_MODULE, 1);
+	local.dev = test->dev;
+	ret = idw_dma_provider_init(&local.provider, local.dev, THIS_MODULE, 1);
 	if (ret)
 		return ret;
-	ret = idw_dma_resource_alloc(&local, PAGE_SIZE, DMA_BIDIRECTIONAL,
-				     &resource);
+	local.provider_ready = true;
+	ret = idw_dma_resource_alloc(&local.provider, PAGE_SIZE,
+				     DMA_BIDIRECTIONAL, &resource);
 	if (ret)
 		goto fini;
-	atomic_inc(&local.vma_refs);
-	ret = idw_dma_provider_fini(&local);
-	if (ret != -EBUSY) {
+	atomic_inc(&local.provider.vma_refs);
+	ret = idw_edu_provider_fini_checked(&local);
+	if (ret != -EBUSY || !local.provider_ready ||
+		    !local.provider.removal_blocked) {
 		ret = -EIO;
 		goto free_resource;
 	}
-	atomic_dec(&local.vma_refs);
-	ret = idw_dma_resource_free(&local, &resource);
+	atomic_dec(&local.provider.vma_refs);
+	ret = idw_dma_resource_free(&local.provider, &resource);
 	if (ret)
 		goto fini;
-	ret = idw_dma_provider_fini(&local);
+	ret = idw_edu_provider_fini_checked(&local);
 	if (ret)
 		return ret;
 
 	memset(&local, 0, sizeof(local));
-	ret = idw_dma_provider_init(&local, test->dev, THIS_MODULE, 2);
+	local.dev = test->dev;
+	ret = idw_dma_provider_init(&local.provider, local.dev, THIS_MODULE, 2);
 	if (ret)
 		return ret;
-	ret = idw_dma_page_alloc(&local, &page);
+	local.provider_ready = true;
+	ret = idw_dma_page_alloc(&local.provider, &page);
 	if (ret)
 		goto fini;
-	ret = idw_dma_provider_fini(&local);
-	if (ret != -EBUSY) {
+	ret = idw_edu_provider_fini_checked(&local);
+	if (ret != -EBUSY || !local.provider_ready ||
+		    !local.provider.removal_blocked) {
 		ret = -EIO;
 		goto free_page;
 	}
-	ret = idw_dma_page_free(&local, &page);
+	ret = idw_dma_page_free(&local.provider, &page);
 	if (ret)
 		goto fini;
-	ret = idw_dma_provider_fini(&local);
+	ret = idw_edu_provider_fini_checked(&local);
 	if (ret)
 		return ret;
 	pr_info("IDW_QEMU_DMA: provider removal refused outstanding refs and recovered after release\n");
+	pr_info("IDW_QEMU_DMA: provider finalization refusal retained owner and recovered after release\n");
 	return 0;
 
 free_page:
-	(void)idw_dma_page_free(&local, &page);
+	(void)idw_dma_page_free(&local.provider, &page);
 	goto fini;
 free_resource:
-	(void)idw_dma_resource_free(&local, &resource);
+	(void)idw_dma_resource_free(&local.provider, &resource);
 fini:
-	(void)idw_dma_provider_fini(&local);
+	(void)idw_edu_provider_fini_checked(&local);
 	return ret;
 }
 
@@ -1222,6 +1241,7 @@ static int idw_edu_probe(struct pci_dev *pdev,
 	struct idw_dma_provider rejected = {};
 	struct idw_dma_provider low_mask = {};
 	int ret;
+	bool owner_retained = false;
 
 	(void)id;
 	test = kzalloc(sizeof(*test), GFP_KERNEL);
@@ -1315,14 +1335,21 @@ fail_provider:
 	if (test->pt_adapter_ready) {
 		int adapter_ret = idw_dma_pt_adapter_fini(&test->pt_adapter);
 
-		if (adapter_ret)
-			pr_warn("IDW_QEMU_DMA: page-table adapter cleanup returned %d\n",
-				adapter_ret);
+		if (adapter_ret) {
+			owner_retained = true;
+			pr_err("IDW_QEMU_DMA: page-table adapter cleanup returned %d; retaining owner\n",
+			       adapter_ret);
+		}
 		test->pt_adapter_ready = false;
 	}
 	if (test->provider_ready) {
-		idw_dma_provider_fini(&test->provider);
-		test->provider_ready = false;
+		int provider_ret = idw_edu_provider_fini_checked(test);
+
+		if (provider_ret) {
+			owner_retained = true;
+			pr_err("IDW_QEMU_DMA: provider finalization refused %d; retaining owner\n",
+			       provider_ret);
+		}
 	}
 fail_master:
 	pci_clear_master(pdev);
@@ -1334,6 +1361,12 @@ fail_regions:
 fail_disable:
 	pci_disable_device(pdev);
 fail_state:
+	if (owner_retained) {
+		pr_err("IDW_QEMU_DMA: probe failure retained owner; cleanup remains incomplete\n");
+		idw_edu_test_result = ret;
+		outb(IDW_QEMU_EXIT_FAIL, IDW_QEMU_DEBUG_EXIT_PORT);
+		return ret;
+	}
 	kfree(test);
 	idw_edu_test_result = ret;
 	pr_err("IDW_QEMU_DMA: probe test failed: %d\n", ret);

@@ -1,0 +1,24 @@
+make -C /lib/modules/6.12.117+deb13-amd64/build M=/workspace/project/intel_win_onlinux/kernel CC=cc modules
+make[1]: Entering directory '/usr/src/linux-headers-6.12.117+deb13-amd64'
+  CC [M]  /workspace/project/intel_win_onlinux/kernel/idw_core_main.o
+  CC [M]  /workspace/project/intel_win_onlinux/kernel/idw_ntshim.o
+  CC [M]  /workspace/project/intel_win_onlinux/kernel/idw_dma_memory.o
+  LD [M]  /workspace/project/intel_win_onlinux/kernel/idw_core.o
+  CC [M]  /workspace/project/intel_win_onlinux/kernel/idw_test_miniport.o
+  CC [M]  /workspace/project/intel_win_onlinux/kernel/idw_edu_dma_test_main.o
+  CC [M]  /workspace/project/intel_win_onlinux/kernel/idw_dma_pt_adapter.o
+  CC [M]  /workspace/project/intel_win_onlinux/kernel/pt_dma_adapter_shared.o
+  CC [M]  /workspace/project/intel_win_onlinux/kernel/page_table_memory_shared.o
+  LD [M]  /workspace/project/intel_win_onlinux/kernel/idw_edu_dma_test.o
+  MODPOST /workspace/project/intel_win_onlinux/kernel/Module.symvers
+  CC [M]  /workspace/project/intel_win_onlinux/kernel/idw_core.mod.o
+  CC [M]  /workspace/project/intel_win_onlinux/kernel/.module-common.o
+  LD [M]  /workspace/project/intel_win_onlinux/kernel/idw_core.ko
+  BTF [M] /workspace/project/intel_win_onlinux/kernel/idw_core.ko
+  CC [M]  /workspace/project/intel_win_onlinux/kernel/idw_test_miniport.mod.o
+  LD [M]  /workspace/project/intel_win_onlinux/kernel/idw_test_miniport.ko
+  BTF [M] /workspace/project/intel_win_onlinux/kernel/idw_test_miniport.ko
+  CC [M]  /workspace/project/intel_win_onlinux/kernel/idw_edu_dma_test.mod.o
+  LD [M]  /workspace/project/intel_win_onlinux/kernel/idw_edu_dma_test.ko
+  BTF [M] /workspace/project/intel_win_onlinux/kernel/idw_edu_dma_test.ko
+make[1]: Leaving directory '/usr/src/linux-headers-6.12.117+deb13-amd64'

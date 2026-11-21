@@ -1,0 +1,22 @@
+date_utc=2026-11-21T10:45:29Z
+uname=Linux runtime-pxnhkrqiyeijsprj-565f7c8ddf-q44rb 6.8.0-1055-gke #61-Ubuntu SMP Tue May 26 22:57:42 UTC 2026 x86_64 GNU/Linux
+os=PRETTY_NAME="Debian GNU/Linux 13 (trixie)"
+--- pci devices ---
+0000:00:00.0 vendor=0x8086 device=0x1237 class=0x060000 driver=none
+0000:00:01.0 vendor=0x8086 device=0x7110 class=0x060100 driver=none
+0000:00:01.3 vendor=0x8086 device=0x7113 class=0x068000 driver=none
+0000:00:03.0 vendor=0x1ae0 device=0x0042 class=0x020000 driver=gve
+0000:00:04.0 vendor=0x1af4 device=0x1005 class=0x00ff00 driver=virtio-pci
+0000:00:05.0 vendor=0x1ae0 device=0x001f class=0x010802 driver=nvme
+--- target 8086:0412 ---
+TARGET_GPU_NOT_PRESENT: 8086:0412 absent
+--- qemu edu 1234:11e8 ---
+QEMU_EDU_DEVICE_NOT_PRESENT
+--- drm ---
+ls: cannot access '/dev/dri': No such file or directory
+--- modules ---
+no matching modules in /proc/modules
+--- i915 module dir ---
+ls: cannot access '/sys/module/i915': No such file or directory
+--- lspci ---
+bash: lspci: command not found

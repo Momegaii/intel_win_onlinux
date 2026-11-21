@@ -100,6 +100,7 @@ private:
         bool ptes_cleared;
         bool ptes_accounted;
         bool invalidation_done;
+        bool va_reserved;
         bool va_released;
         bool dma_unmapped;
         bool backing_released;

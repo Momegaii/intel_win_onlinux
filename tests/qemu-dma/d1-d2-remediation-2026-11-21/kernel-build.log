@@ -1,0 +1,3 @@
+make -C /lib/modules/6.12.117+deb13-amd64/build M=/workspace/project/intel_win_onlinux/kernel CC=cc modules
+make[1]: Entering directory '/usr/src/linux-headers-6.12.117+deb13-amd64'
+make[1]: Leaving directory '/usr/src/linux-headers-6.12.117+deb13-amd64'
