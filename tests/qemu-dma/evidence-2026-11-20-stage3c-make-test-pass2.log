@@ -1,0 +1,170 @@
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude -fsyntax-only tests/contracts/contracts_compile.c
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	src/page_table_memory.c src/i915_assisted_backend.c \
+	src/native_dma_contract.c tests/page-table-memory-contract-test.c \
+	-o build/page-table-memory-contract-test
+./build/page-table-memory-contract-test
+PASS: page-table backend capability and device-scope contract tests
+NOTE: synthetic descriptors validate contracts only; no DMA or GPU operation occurred.
+g++ -I/usr/include/libdrm  -std=c++17 -O2 -Wall -Wextra -Wpedantic src/i915_gem_resource_backend.cpp \
+	tests/i915-gem-resource-backend-test.cpp \
+	-o build/i915-gem-resource-backend-test -ldrm 
+In file included from src/../include/idw/i915_gem_resource_backend.hpp:8,
+                 from src/i915_gem_resource_backend.cpp:2:
+/usr/include/libdrm/i915_drm.h:2232:43: warning: ISO C++ forbids flexible array member ‘engines’ [-Wpedantic]
+ 2232 |         struct i915_engine_class_instance engines[];
+      |                                           ^~~~~~~
+/usr/include/libdrm/i915_drm.h:2270:43: warning: ISO C++ forbids flexible array member ‘engines’ [-Wpedantic]
+ 2270 |         struct i915_engine_class_instance engines[];
+      |                                           ^~~~~~~
+/usr/include/libdrm/i915_drm.h:2397:43: warning: ISO C++ forbids flexible array member ‘engines’ [-Wpedantic]
+ 2397 |         struct i915_engine_class_instance engines[];
+      |                                           ^~~~~~~
+/usr/include/libdrm/i915_drm.h:2472:51: warning: ISO C++ forbids zero-size array ‘engines’ [-Wpedantic]
+ 2472 |         struct i915_engine_class_instance engines[0];
+      |                                                   ^
+/usr/include/libdrm/i915_drm.h:3114:14: warning: ISO C++ forbids flexible array member ‘data’ [-Wpedantic]
+ 3114 |         __u8 data[];
+      |              ^~~~
+/usr/include/libdrm/i915_drm.h:3231:37: warning: ISO C++ forbids flexible array member ‘engines’ [-Wpedantic]
+ 3231 |         struct drm_i915_engine_info engines[];
+      |                                     ^~~~~~~
+/usr/include/libdrm/i915_drm.h:3297:14: warning: ISO C++ forbids flexible array member ‘data’ [-Wpedantic]
+ 3297 |         __u8 data[];
+      |              ^~~~
+/usr/include/libdrm/i915_drm.h:3360:24: warning: ISO C++ prohibits anonymous structs [-Wpedantic]
+ 3360 |                 struct {
+      |                        ^
+/usr/include/libdrm/i915_drm.h:3467:44: warning: ISO C++ forbids flexible array member ‘regions’ [-Wpedantic]
+ 3467 |         struct drm_i915_memory_region_info regions[];
+      |                                            ^~~~~~~
+In file included from tests/../include/idw/i915_gem_resource_backend.hpp:8,
+                 from tests/i915-gem-resource-backend-test.cpp:2:
+/usr/include/libdrm/i915_drm.h:2232:43: warning: ISO C++ forbids flexible array member ‘engines’ [-Wpedantic]
+ 2232 |         struct i915_engine_class_instance engines[];
+      |                                           ^~~~~~~
+/usr/include/libdrm/i915_drm.h:2270:43: warning: ISO C++ forbids flexible array member ‘engines’ [-Wpedantic]
+ 2270 |         struct i915_engine_class_instance engines[];
+      |                                           ^~~~~~~
+/usr/include/libdrm/i915_drm.h:2397:43: warning: ISO C++ forbids flexible array member ‘engines’ [-Wpedantic]
+ 2397 |         struct i915_engine_class_instance engines[];
+      |                                           ^~~~~~~
+/usr/include/libdrm/i915_drm.h:2472:51: warning: ISO C++ forbids zero-size array ‘engines’ [-Wpedantic]
+ 2472 |         struct i915_engine_class_instance engines[0];
+      |                                                   ^
+/usr/include/libdrm/i915_drm.h:3114:14: warning: ISO C++ forbids flexible array member ‘data’ [-Wpedantic]
+ 3114 |         __u8 data[];
+      |              ^~~~
+/usr/include/libdrm/i915_drm.h:3231:37: warning: ISO C++ forbids flexible array member ‘engines’ [-Wpedantic]
+ 3231 |         struct drm_i915_engine_info engines[];
+      |                                     ^~~~~~~
+/usr/include/libdrm/i915_drm.h:3297:14: warning: ISO C++ forbids flexible array member ‘data’ [-Wpedantic]
+ 3297 |         __u8 data[];
+      |              ^~~~
+/usr/include/libdrm/i915_drm.h:3360:24: warning: ISO C++ prohibits anonymous structs [-Wpedantic]
+ 3360 |                 struct {
+      |                        ^
+/usr/include/libdrm/i915_drm.h:3467:44: warning: ISO C++ forbids flexible array member ‘regions’ [-Wpedantic]
+ 3467 |         struct drm_i915_memory_region_info regions[];
+      |                                            ^~~~~~~
+./build/i915-gem-resource-backend-test
+PASS: i915 GEM resource backend state, binding, and cleanup tests
+NOTE: ioctl callbacks are simulated; no physical GPU or DMA was tested.
+g++ -I/usr/include/libdrm  -std=c++17 -Wall -Wextra -Werror -Iinclude \
+	src/memory_manager.cpp src/i915_gem_resource_backend.cpp \
+	src/i915_memory_backend.cpp src/gpu_submission.cpp \
+	tests/i915-memory-backend-test.cpp \
+	build/gpuva_model.o -o build/i915-memory-backend-test -ldrm 
+./build/i915-memory-backend-test
+PASS: i915-assisted memory lifecycle, GPU write, and recovery tests
+NOTE: DRM ioctls are simulated; no physical GPU was used.
+g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
+	src/gpu_submission.cpp tests/gpu-submission-test.cpp \
+	-o build/gpu-submission-test
+./build/gpu-submission-test
+PASS: Haswell no-op and store-dword encoding, bounds, failure, and cleanup tests
+NOTE: callbacks are simulated; this is not physical GPU execution evidence.
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	-c src/gpuva_model.c -o build/gpuva_model-memory-test.o
+g++ -std=c++17 -Wall -Wextra -Werror -pedantic -Iinclude \
+	src/memory_manager.cpp build/gpuva_model-memory-test.o \
+	tests/memory-manager-test.cpp \
+	-o build/memory-manager-test
+./build/memory-manager-test
+PASS: integrated memory allocation, VA, binding, submission, and recovery lifecycle
+NOTE: backend is simulated; this is not physical GPU validation.
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	-c src/gpuva_model.c -o build/gpuva_model-host-memory-test.o
+g++ -std=c++17 -Wall -Wextra -Werror -pedantic -Iinclude \
+	src/memory_manager.cpp src/host_memory_backend.cpp \
+	build/gpuva_model-host-memory-test.o \
+	tests/host-memory-backend-test.cpp \
+	-o build/host-memory-backend-test
+./build/host-memory-backend-test
+PASS: host backing allocates real pages and integrates with MemoryManager
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	-c src/gpuva_model.c -o build/gpuva_model-native-dma-test.o
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	-c src/page_table_memory.c -o build/page_table_memory-native-dma-test.o
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	-c src/haswell_ppgtt_model.c -o build/haswell_ppgtt_model-native-dma-test.o
+g++ -std=c++17 -Wall -Wextra -Werror -pedantic -Iinclude \
+	src/memory_manager.cpp src/native_dma_backend.cpp \
+	build/gpuva_model-native-dma-test.o \
+	build/page_table_memory-native-dma-test.o \
+	build/haswell_ppgtt_model-native-dma-test.o \
+	tests/native-dma-backend-test.cpp \
+	-o build/native-dma-backend-test
+./build/native-dma-backend-test
+SKIP: /dev/idw-edu-dma is not present; run under the QEMU EDU harness
+g++ -std=c++17 -Wall -Wextra -Werror -pedantic -Iinclude \
+	src/memory_manager.cpp src/native_dma_backend.cpp \
+	build/gpuva_model-native-dma-test.o \
+	build/page_table_memory-native-dma-test.o \
+	build/haswell_ppgtt_model-native-dma-test.o \
+	tests/native-dma-fault-test.cpp \
+	-o build/native-dma-fault-test
+./build/native-dma-fault-test
+SKIP: /dev/idw-edu-dma is not present; run under the QEMU EDU harness
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude -o build/abi-layout-test tests/abi-layout-test.c
+./build/abi-layout-test
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	src/gpuva_model.c src/page_table_memory.c src/haswell_ppgtt_model.c \
+	tests/ppgtt-model-test.c \
+	-o build/ppgtt-model-test
+./build/ppgtt-model-test
+PASS: CPU-only GPU-VA allocator and Haswell Gen7.5 PPGTT model tests
+NOTE: synthetic DMA addresses validate software structures only; no GPU mapping or hardware control was tested.
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	src/gpuva_model.c src/page_table_memory.c src/haswell_ppgtt_model.c \
+	src/pt_dma_adapter.c src/native_dma_contract.c \
+	tests/pt-dma-adapter-test.c \
+	-o build/pt-dma-adapter-test
+./build/pt-dma-adapter-test
+PASS: DMA page-table adapter validation, rollback, sync, cleanup, and PPGTT integration
+NOTE: synthetic DMA addresses and simulated provider; no device or GPU operation occurred.
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	src/ggtt_allocator.c tests/ggtt-allocator-test.c \
+	-o build/ggtt-allocator-test
+./build/ggtt-allocator-test
+PASS: GGTT allocator, residency, binding, and teardown tests
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	src/ggtt_allocator.c src/haswell_gtt_hw.c src/ggtt_directory.c \
+	src/page_table_memory.c src/haswell_ppgtt_model.c \
+	tests/haswell-gtt-hw-test.c -o build/haswell-gtt-hw-test
+./build/haswell-gtt-hw-test
+PASS: Haswell GGTT directory, hardware sequence, and rollback tests
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	src/device_lifecycle.c tests/device-lifecycle-test.c \
+	-o build/device-lifecycle-test
+./build/device-lifecycle-test
+PASS: independent-device ownership, teardown, and recovery tests
+./tests/cli-arguments-smoke.sh
+PASS: CLI rejects overflowing, partial, signed, and unexpected arguments before device access.
+./tests/smoke.sh
+IDW — Intel GPU Properties
+==========================
+No Intel DRM render node found.
+Check: lspci -nnk | grep -A3 -i vga and ls -l /dev/dri
+FAIL: no Intel render node found
+make: *** [Makefile:189: test] Error 2

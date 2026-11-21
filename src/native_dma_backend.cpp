@@ -95,6 +95,104 @@ NativeDmaMemoryBackend::find_page_table(uint64_t cookie)
     return nullptr;
 }
 
+bool NativeDmaMemoryBackend::add_counter(uint64_t& counter, uint64_t amount)
+{
+    if (counter > UINT64_MAX - amount)
+        return false;
+    counter += amount;
+    return true;
+}
+
+bool NativeDmaMemoryBackend::sub_counter(uint64_t& counter, uint64_t amount)
+{
+    if (counter < amount)
+        return false;
+    counter -= amount;
+    return true;
+}
+
+bool NativeDmaMemoryBackend::transition(Allocation& allocation,
+                                        ResourceState next)
+{
+    const ResourceState current = allocation.state;
+    if (current == next)
+        return true;
+    bool legal = false;
+    switch (current) {
+    case ResourceState::New:
+        legal = next == ResourceState::BackingAllocated ||
+                next == ResourceState::Quarantined;
+        break;
+    case ResourceState::BackingAllocated:
+        legal = next == ResourceState::VaReserved ||
+                next == ResourceState::Destroying ||
+                next == ResourceState::Quarantined;
+        break;
+    case ResourceState::VaReserved:
+        legal = next == ResourceState::DmaMapped ||
+                next == ResourceState::BackingAllocated ||
+                next == ResourceState::Quarantined;
+        break;
+    case ResourceState::DmaMapped:
+        legal = next == ResourceState::PgttPopulated ||
+                next == ResourceState::BackingAllocated ||
+                next == ResourceState::Quarantined;
+        break;
+    case ResourceState::PgttPopulated:
+        legal = next == ResourceState::PtSynchronized ||
+                next == ResourceState::BackingAllocated ||
+                next == ResourceState::Quarantined;
+        break;
+    case ResourceState::PtSynchronized:
+        legal = next == ResourceState::ReadyInactive ||
+                next == ResourceState::BackingAllocated ||
+                next == ResourceState::Quarantined;
+        break;
+    case ResourceState::ReadyInactive:
+        legal = next == ResourceState::Destroying ||
+                next == ResourceState::Quarantined;
+        break;
+    case ResourceState::Destroying:
+        legal = next == ResourceState::BackingAllocated ||
+                next == ResourceState::Released ||
+                next == ResourceState::Quarantined;
+        break;
+    case ResourceState::Quarantined:
+        legal = next == ResourceState::Destroying ||
+                next == ResourceState::Released;
+        break;
+    case ResourceState::Released:
+        legal = false;
+        break;
+    }
+    if (!legal)
+        return false;
+    allocation.state = next;
+    return true;
+}
+
+void NativeDmaMemoryBackend::quarantine(Allocation& allocation)
+{
+    if (allocation.state != ResourceState::Quarantined) {
+        if (transition(allocation, ResourceState::Quarantined))
+            (void)add_counter(counters_.quarantined_pages,
+                              allocation.page_count);
+    }
+}
+
+int NativeDmaMemoryBackend::check_inactive() const
+{
+    if (!model_)
+        return 0;
+    if (idw_hsw_ppgtt_is_active(model_))
+        return -EBUSY;
+    struct idw_hsw_ppgtt_pending_invalidation pending = {};
+    pending.size = sizeof(pending);
+    if (idw_hsw_ppgtt_pending(model_, &pending))
+        return -EIO;
+    return pending.pending ? -EAGAIN : 0;
+}
+
 int NativeDmaMemoryBackend::create_backing_cb(void *userdata, uint64_t bytes,
                                               uint64_t *backing)
 {
@@ -107,6 +205,9 @@ int NativeDmaMemoryBackend::create_backing_cb_impl(uint64_t bytes,
 {
     if (!backing || !bytes || (bytes % kPageSize))
         return -EINVAL;
+    if (faults_.create_fail_at >= 0 &&
+        static_cast<size_t>(faults_.create_fail_at) == allocations_.size())
+        return -ENOMEM;
     int ret = open_device();
     if (ret)
         return ret;
@@ -149,17 +250,63 @@ int NativeDmaMemoryBackend::create_backing_cb_impl(uint64_t bytes,
         return -errno;
     }
 
+    Allocation allocation{};
+    allocation.backing = request.cookie;
+    allocation.device_cookie = request.device_cookie;
+    allocation.generation = request.generation;
+    allocation.bytes = mapping_bytes;
+    allocation.address = address;
+    allocation.bound = false;
+    allocation.ptes_cleared = false;
+    allocation.ptes_accounted = false;
+    allocation.invalidation_done = false;
+    allocation.va_released = false;
+    allocation.dma_unmapped = false;
+    allocation.backing_released = false;
+    allocation.release_safe = false;
+    allocation.va = 0;
+    allocation.page_count = request.page_count;
+    allocation.state = ResourceState::New;
+    if (!add_counter(counters_.allocated_pages, request.page_count)) {
+        ::munmap(address, static_cast<size_t>(mapping_bytes));
+        struct idw_dma_test_free release = {};
+        release.size = sizeof(release);
+        release.cookie = request.cookie;
+        (void)ioctl_call(fd_, IDW_DMA_TEST_IOCTL_FREE, &release);
+        return -EOVERFLOW;
+    }
+    if (!add_counter(counters_.mapped_pages, request.page_count)) {
+        (void)sub_counter(counters_.allocated_pages, request.page_count);
+        ::munmap(address, static_cast<size_t>(mapping_bytes));
+        struct idw_dma_test_free release = {};
+        release.size = sizeof(release);
+        release.cookie = request.cookie;
+        (void)ioctl_call(fd_, IDW_DMA_TEST_IOCTL_FREE, &release);
+        return -EOVERFLOW;
+    }
     try {
-        allocations_.push_back({request.cookie, request.device_cookie,
-                                request.generation, mapping_bytes, address,
-                                false, 0});
+        allocations_.push_back(allocation);
     } catch (const std::bad_alloc&) {
+        (void)sub_counter(counters_.allocated_pages, request.page_count);
+        (void)sub_counter(counters_.mapped_pages, request.page_count);
         ::munmap(address, static_cast<size_t>(mapping_bytes));
         struct idw_dma_test_free release = {};
         release.size = sizeof(release);
         release.cookie = request.cookie;
         (void)ioctl_call(fd_, IDW_DMA_TEST_IOCTL_FREE, &release);
         return -ENOMEM;
+    }
+    Allocation& stored = allocations_.back();
+    if (!transition(stored, ResourceState::BackingAllocated)) {
+        allocations_.pop_back();
+        (void)sub_counter(counters_.allocated_pages, request.page_count);
+        (void)sub_counter(counters_.mapped_pages, request.page_count);
+        ::munmap(address, static_cast<size_t>(mapping_bytes));
+        struct idw_dma_test_free release = {};
+        release.size = sizeof(release);
+        release.cookie = request.cookie;
+        (void)ioctl_call(fd_, IDW_DMA_TEST_IOCTL_FREE, &release);
+        return -EIO;
     }
     scope_.device_cookie = request.device_cookie;
     scope_.generation = request.generation;
@@ -181,16 +328,62 @@ int NativeDmaMemoryBackend::destroy_backing_cb_impl(uint64_t backing)
         return -ENOENT;
     if (allocation->bound)
         return -EBUSY;
+    if (allocation->state == ResourceState::Quarantined &&
+        !allocation->release_safe)
+        return -EBUSY;
+    if (allocation->state != ResourceState::BackingAllocated &&
+        allocation->state != ResourceState::Quarantined)
+        return -EINVAL;
+    bool was_quarantined =
+        allocation->state == ResourceState::Quarantined;
+    if (faults_.destroy_fail) {
+        allocation->release_safe = true;
+        quarantine(*allocation);
+        return -EIO;
+    }
+    if (!transition(*allocation, ResourceState::Destroying))
+        return -EINVAL;
 
-    ::munmap(allocation->address, static_cast<size_t>(allocation->bytes));
+    if (!allocation->dma_unmapped) {
+        if (allocation->address) {
+            ::munmap(allocation->address,
+                     static_cast<size_t>(allocation->bytes));
+            allocation->address = nullptr;
+        }
+        allocation->dma_unmapped = true;
+        if (faults_.destroy_fail_after_unmap) {
+            allocation->release_safe = true;
+            quarantine(*allocation);
+            return -EIO;
+        }
+    }
 
-    struct idw_dma_test_free request = {};
-    request.size = sizeof(request);
-    request.cookie = allocation->backing;
-    int ret = ioctl_call(fd_, IDW_DMA_TEST_IOCTL_FREE, &request);
-    if (ret)
-        return ret;
+    if (!allocation->backing_released) {
+        struct idw_dma_test_free request = {};
+        request.size = sizeof(request);
+        request.cookie = allocation->backing;
+        int ret = ioctl_call(fd_, IDW_DMA_TEST_IOCTL_FREE, &request);
+        if (ret) {
+            allocation->release_safe = true;
+            quarantine(*allocation);
+            return ret;
+        }
+        allocation->backing_released = true;
+    }
 
+    if (counters_.allocated_pages < allocation->page_count ||
+        counters_.mapped_pages < allocation->page_count) {
+        allocation->release_safe = true;
+        quarantine(*allocation);
+        return -EIO;
+    }
+    (void)sub_counter(counters_.allocated_pages, allocation->page_count);
+    (void)sub_counter(counters_.mapped_pages, allocation->page_count);
+    if (was_quarantined)
+        (void)sub_counter(counters_.quarantined_pages,
+                          allocation->page_count);
+    if (!transition(*allocation, ResourceState::Released))
+        return -EIO;
     allocations_.erase(allocations_.begin() +
                        (allocation - allocations_.data()));
     return 0;
@@ -215,27 +408,143 @@ int NativeDmaMemoryBackend::bind_cb_impl(uint64_t backing,
     Allocation *allocation = find_allocation(backing);
     if (!allocation)
         return -ENOENT;
-    if (allocation->bound)
+    if (allocation->bound || allocation->state == ResourceState::Quarantined)
         return -EBUSY;
     if (allocation->bytes != bytes)
+        return -EINVAL;
+    if (allocation->state != ResourceState::BackingAllocated)
+        return -EINVAL;
+    allocation->ptes_cleared = false;
+    allocation->ptes_accounted = false;
+    allocation->invalidation_done = false;
+    allocation->va_released = false;
+    allocation->dma_unmapped = false;
+    allocation->backing_released = false;
+    if (!transition(*allocation, ResourceState::VaReserved))
         return -EINVAL;
 
     std::vector<idw_dma_page_mapping> mappings;
     int ret = get_segments(backing, mappings);
-    if (ret)
+    if (ret) {
+        (void)transition(*allocation, ResourceState::BackingAllocated);
         return ret;
-    if (mappings.size() * kPageSize != bytes)
+    }
+    if (mappings.size() * kPageSize != bytes ||
+        mappings.size() != allocation->page_count) {
+        (void)transition(*allocation, ResourceState::BackingAllocated);
+        return -EIO;
+    }
+    if (!transition(*allocation, ResourceState::DmaMapped))
         return -EIO;
     ret = ensure_model();
-    if (ret)
+    if (ret) {
+        (void)transition(*allocation, ResourceState::BackingAllocated);
         return ret;
+    }
     ret = idw_hsw_ppgtt_map(model_, requested_va, bytes, mappings.data(),
                             mappings.size());
-    if (ret)
+    if (ret) {
+        bool cleared = true;
+        if (!idw_hsw_ppgtt_range_cleared(model_, requested_va, bytes,
+                                         &cleared) &&
+            !cleared) {
+            allocation->bound = true;
+            allocation->va = requested_va;
+            *actual_va = requested_va;
+            if (!add_counter(counters_.populated_ptes,
+                             allocation->page_count)) {
+                quarantine(*allocation);
+                return -EOVERFLOW;
+            }
+            quarantine(*allocation);
+            return -EUCLEAN;
+        }
+        (void)transition(*allocation, ResourceState::BackingAllocated);
         return ret;
+    }
+    if (!transition(*allocation, ResourceState::PgttPopulated)) {
+        quarantine(*allocation);
+        return -EIO;
+    }
+    allocation->bound = true;
+    allocation->va = requested_va;
+    if (!add_counter(counters_.populated_ptes, allocation->page_count)) {
+        quarantine(*allocation);
+        return -EOVERFLOW;
+    }
+    ret = check_inactive();
+    if (ret == -EAGAIN) {
+        struct idw_hsw_ppgtt_pending_invalidation pending = {};
+        pending.size = sizeof(pending);
+        ret = idw_hsw_ppgtt_pending(model_, &pending);
+        if (!ret && pending.pending)
+            ret = idw_hsw_ppgtt_invalidation_complete(model_,
+                                                      pending.generation);
+        if (!ret)
+            ret = check_inactive();
+    }
+    if (ret) {
+        quarantine(*allocation);
+        return ret;
+    }
+    if (!transition(*allocation, ResourceState::PtSynchronized)) {
+        quarantine(*allocation);
+        return -EIO;
+    }
+    if (!transition(*allocation, ResourceState::ReadyInactive)) {
+        quarantine(*allocation);
+        return -EIO;
+    }
+    if (!add_counter(counters_.va_reservations, 1)) {
+        quarantine(*allocation);
+        return -EOVERFLOW;
+    }
+    if (faults_.bind_fail_after_map) {
+        allocation->bound = true;
+        allocation->va = requested_va;
+        *actual_va = requested_va;
+        quarantine(*allocation);
+        return -EIO;
+    }
     allocation->bound = true;
     allocation->va = requested_va;
     *actual_va = requested_va;
+    return 0;
+}
+
+int NativeDmaMemoryBackend::complete_unbind(Allocation& allocation)
+{
+    if (!model_)
+        return -ENODEV;
+    if (!allocation.invalidation_done) {
+        struct idw_hsw_ppgtt_pending_invalidation pending = {};
+        pending.size = sizeof(pending);
+        int ret = idw_hsw_ppgtt_pending(model_, &pending);
+        if (ret)
+            return ret;
+        if (pending.pending) {
+            ret = idw_hsw_ppgtt_invalidation_complete(model_,
+                                                      pending.generation);
+            if (ret)
+                return ret;
+        }
+        allocation.invalidation_done = true;
+    }
+    if (!allocation.va_released) {
+        if (!sub_counter(counters_.va_reservations, 1))
+            return -EIO;
+        allocation.va_released = true;
+    }
+    allocation.bound = false;
+    allocation.va = 0;
+    if (!transition(allocation, ResourceState::BackingAllocated))
+        return -EIO;
+    allocation.ptes_cleared = false;
+    allocation.ptes_accounted = false;
+    allocation.invalidation_done = false;
+    allocation.va_released = false;
+    allocation.dma_unmapped = false;
+    allocation.backing_released = false;
     return 0;
 }
 
@@ -252,27 +561,77 @@ int NativeDmaMemoryBackend::unbind_cb_impl(uint64_t backing, idw_gpuva va,
     Allocation *allocation = find_allocation(backing);
     if (!allocation)
         return -ENOENT;
-    if (!allocation->bound || allocation->va != va ||
-        allocation->bytes != bytes)
+    if (allocation->bytes != bytes || allocation->va != va)
         return -EINVAL;
     if (!model_)
         return -ENODEV;
-    int ret = idw_hsw_ppgtt_unmap(model_, va, bytes);
-    if (ret)
+    if (allocation->state == ResourceState::Quarantined &&
+        !allocation->ptes_cleared && !allocation->bound)
+        return -EBUSY;
+    if (allocation->state != ResourceState::ReadyInactive &&
+        allocation->state != ResourceState::Quarantined)
+        return -EINVAL;
+    bool was_quarantined =
+        allocation->state == ResourceState::Quarantined;
+    if (!transition(*allocation, ResourceState::Destroying))
+        return -EINVAL;
+
+    int ret = idw_hsw_ppgtt_retry_sync(model_);
+    if (ret) {
+        quarantine(*allocation);
         return ret;
-    struct idw_hsw_ppgtt_pending_invalidation pending = {};
-    pending.size = sizeof(pending);
-    ret = idw_hsw_ppgtt_pending(model_, &pending);
-    if (ret)
-        return ret;
-    if (pending.pending) {
-        ret = idw_hsw_ppgtt_invalidation_complete(model_,
-                                                  pending.generation);
-        if (ret)
-            return ret;
     }
-    allocation->bound = false;
-    allocation->va = 0;
+    if (!allocation->ptes_cleared) {
+        bool cleared = false;
+        ret = idw_hsw_ppgtt_range_cleared(model_, va, bytes, &cleared);
+        if (ret) {
+            quarantine(*allocation);
+            return ret;
+        }
+        if (!cleared) {
+            ret = idw_hsw_ppgtt_unmap(model_, va, bytes);
+            if (ret) {
+                cleared = false;
+                if (!idw_hsw_ppgtt_range_cleared(model_, va, bytes,
+                                                 &cleared) &&
+                    cleared)
+                    allocation->ptes_cleared = true;
+                else {
+                    quarantine(*allocation);
+                    return ret;
+                }
+            } else {
+                allocation->ptes_cleared = true;
+            }
+        } else {
+            allocation->ptes_cleared = true;
+        }
+    }
+    if (!allocation->ptes_accounted) {
+        if (!sub_counter(counters_.populated_ptes,
+                         allocation->page_count)) {
+            quarantine(*allocation);
+            return -EIO;
+        }
+        allocation->ptes_accounted = true;
+    }
+    ret = idw_hsw_ppgtt_retry_sync(model_);
+    if (ret) {
+        quarantine(*allocation);
+        return ret;
+    }
+    if (faults_.unbind_fail_invalidation) {
+        quarantine(*allocation);
+        return -EIO;
+    }
+    ret = complete_unbind(*allocation);
+    if (ret) {
+        quarantine(*allocation);
+        return ret;
+    }
+    if (was_quarantined)
+        (void)sub_counter(counters_.quarantined_pages,
+                          allocation->page_count);
     return 0;
 }
 
@@ -351,9 +710,12 @@ int NativeDmaMemoryBackend::wait_cb_impl(uint64_t fence)
 
 int NativeDmaMemoryBackend::quiesce_cb(void *userdata, uint64_t fence)
 {
-    (void)userdata;
-    (void)fence;
-    return 0;
+    auto *self = static_cast<NativeDmaMemoryBackend *>(userdata);
+    if (!self)
+        return -EINVAL;
+    if (fence && fence >= self->next_fence_)
+        return -EINVAL;
+    return self->check_inactive();
 }
 
 int NativeDmaMemoryBackend::cpu_read_dword_cb(void *userdata, uint64_t backing,
@@ -489,6 +851,10 @@ int NativeDmaMemoryBackend::alloc_page_table_page(struct idw_dma_page *page)
 {
     if (!page)
         return -EINVAL;
+    if (faults_.page_table_fail_at >= 0 &&
+        static_cast<size_t>(faults_.page_table_fail_at) ==
+            page_tables_.size())
+        return -ENOMEM;
     struct idw_dma_test_pt request = {};
     request.size = sizeof(request);
     int ret = ioctl_call(fd_, IDW_DMA_TEST_IOCTL_ALLOC_PT, &request);
@@ -525,11 +891,35 @@ int NativeDmaMemoryBackend::alloc_page_table_page(struct idw_dma_page *page)
         (void)ioctl_call(fd_, IDW_DMA_TEST_IOCTL_FREE_PT, &release);
         return -errno;
     }
+    if (faults_.mmap_fail) {
+        ::munmap(address, kPageSize);
+        struct idw_dma_test_pt release = {};
+        release.size = sizeof(release);
+        release.cookie = request.cookie;
+        (void)ioctl_call(fd_, IDW_DMA_TEST_IOCTL_FREE_PT, &release);
+        return -ENOMEM;
+    }
+    PageTable table{};
+    table.cookie = request.cookie;
+    table.device_cookie = request.device_cookie;
+    table.generation = request.generation;
+    table.dma_address = request.dma_address;
+    table.bytes = request.bytes;
+    table.address = address;
+    table.unmapped = false;
+    table.quarantined = false;
+    if (!add_counter(counters_.pt_pages, 1)) {
+        ::munmap(address, kPageSize);
+        struct idw_dma_test_pt release = {};
+        release.size = sizeof(release);
+        release.cookie = request.cookie;
+        (void)ioctl_call(fd_, IDW_DMA_TEST_IOCTL_FREE_PT, &release);
+        return -EOVERFLOW;
+    }
     try {
-        page_tables_.push_back({request.cookie, request.device_cookie,
-                                request.generation, request.dma_address,
-                                request.bytes, address});
+        page_tables_.push_back(table);
     } catch (const std::bad_alloc&) {
+        (void)sub_counter(counters_.pt_pages, 1);
         ::munmap(address, kPageSize);
         struct idw_dma_test_pt release = {};
         release.size = sizeof(release);
@@ -563,13 +953,54 @@ void NativeDmaMemoryBackend::free_page_table_page(struct idw_dma_page *page)
     PageTable *table = find_page_table(page->allocation_cookie);
     if (!table)
         return;
-    ::munmap(table->address, kPageSize);
+    if (faults_.free_page_table_fail) {
+        if (!table->quarantined) {
+            table->quarantined = true;
+            (void)add_counter(counters_.quarantined_pages, 1);
+        }
+        return;
+    }
+    if (!table->unmapped) {
+        if (::munmap(table->address, kPageSize) != 0) {
+            if (!table->quarantined) {
+                table->quarantined = true;
+                (void)add_counter(counters_.quarantined_pages, 1);
+            }
+            return;
+        }
+        table->unmapped = true;
+        table->address = nullptr;
+    }
     struct idw_dma_test_pt release = {};
     release.size = sizeof(release);
     release.cookie = table->cookie;
-    (void)ioctl_call(fd_, IDW_DMA_TEST_IOCTL_FREE_PT, &release);
+    if (ioctl_call(fd_, IDW_DMA_TEST_IOCTL_FREE_PT, &release) != 0) {
+        if (!table->quarantined) {
+            table->quarantined = true;
+            (void)add_counter(counters_.quarantined_pages, 1);
+        }
+        return;
+    }
+    (void)sub_counter(counters_.pt_pages, 1);
+    if (table->quarantined)
+        (void)sub_counter(counters_.quarantined_pages, 1);
+    table->released = true;
     page_tables_.erase(page_tables_.begin() + (table - page_tables_.data()));
     std::memset(page, 0, sizeof(*page));
+}
+
+int NativeDmaMemoryBackend::release_remaining_page_tables()
+{
+    while (!page_tables_.empty()) {
+        const uint64_t cookie = page_tables_.front().cookie;
+        struct idw_dma_page page = {};
+        page.size = sizeof(page);
+        page.allocation_cookie = cookie;
+        free_page_table_page(&page);
+        if (find_page_table(cookie))
+            return -EBUSY;
+    }
+    return 0;
 }
 
 int NativeDmaMemoryBackend::sync_page_table_for_device_cb(
@@ -587,6 +1018,8 @@ int NativeDmaMemoryBackend::sync_page_table_for_device(
         return -EINVAL;
     if (!bytes)
         return 0;
+    if (faults_.sync_page_table_fail || faults_.unbind_fail_sync)
+        return -EIO;
     struct idw_dma_test_pt request = {};
     request.size = sizeof(request);
     request.cookie = page->allocation_cookie;
@@ -689,12 +1122,33 @@ int NativeDmaMemoryBackend::close_all()
     if (!allocations_.empty())
         return -EBUSY;
     if (model_) {
-        int ret = idw_hsw_ppgtt_model_destroy_checked(model_, true);
+        struct idw_hsw_ppgtt_pending_invalidation pending = {};
+        pending.size = sizeof(pending);
+        int ret = idw_hsw_ppgtt_pending(model_, &pending);
+        if (ret)
+            return ret;
+        if (pending.pending) {
+            ret = idw_hsw_ppgtt_invalidation_complete(model_,
+                                                      pending.generation);
+            if (ret)
+                return ret;
+        }
+        ret = check_inactive();
+        if (ret)
+            return ret;
+        ret = idw_hsw_ppgtt_model_destroy_checked(model_, false);
         if (ret)
             return ret;
         model_ = nullptr;
     }
-    if (!page_tables_.empty())
+    if (!page_tables_.empty()) {
+        int ret = release_remaining_page_tables();
+        if (ret)
+            return ret;
+    }
+    if (counters_.allocated_pages || counters_.mapped_pages ||
+        counters_.populated_ptes || counters_.pt_pages ||
+        counters_.va_reservations || counters_.quarantined_pages)
         return -EBUSY;
     if (fd_ >= 0) {
         ::close(fd_);
@@ -766,6 +1220,43 @@ size_t NativeDmaMemoryBackend::allocation_count() const
 size_t NativeDmaMemoryBackend::page_table_count() const
 {
     return page_tables_.size();
+}
+
+NativeDmaMemoryBackend::OwnershipCounters
+NativeDmaMemoryBackend::counters() const
+{
+    return counters_;
+}
+
+int NativeDmaMemoryBackend::allocation_state(uint64_t backing,
+                                              ResourceState& state) const
+{
+    const Allocation *allocation = find_allocation(backing);
+    if (!allocation)
+        return -ENOENT;
+    state = allocation->state;
+    return 0;
+}
+
+int NativeDmaMemoryBackend::teardown_progress(
+    uint64_t backing, TeardownProgress& progress) const
+{
+    const Allocation *allocation = find_allocation(backing);
+    if (!allocation)
+        return -ENOENT;
+    progress.ptes_cleared = allocation->ptes_cleared;
+    progress.ptes_accounted = allocation->ptes_accounted;
+    progress.invalidation_done = allocation->invalidation_done;
+    progress.va_released = allocation->va_released;
+    progress.dma_unmapped = allocation->dma_unmapped;
+    progress.backing_released = allocation->backing_released;
+    progress.complete = allocation->state == ResourceState::Released;
+    return 0;
+}
+
+void NativeDmaMemoryBackend::set_fault_plan(const FaultPlan& plan)
+{
+    faults_ = plan;
 }
 
 } // namespace idw

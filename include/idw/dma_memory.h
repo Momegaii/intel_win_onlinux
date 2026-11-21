@@ -2,6 +2,7 @@
 #ifndef IDW_DMA_MEMORY_H
 #define IDW_DMA_MEMORY_H
 
+#include <linux/atomic.h>
 #include <linux/device.h>
 #include <linux/dma-mapping.h>
 #include <linux/list.h>
@@ -24,11 +25,15 @@
 #define IDW_DMA_RESOURCE_MAX_BYTES (64ULL * 1024 * 1024)
 #define IDW_DMA_RESOURCE_MAX_PAGES (IDW_DMA_RESOURCE_MAX_BYTES / PAGE_SIZE)
 
+struct idw_dma_provider;
+
 struct idw_dma_provider_page {
 	struct list_head link;
+	struct idw_dma_provider *provider;
 	void *cpu_address;
 	dma_addr_t dma_address;
 	u64 cookie;
+	atomic_t mappings;
 };
 
 struct idw_dma_page_info {
@@ -45,6 +50,8 @@ struct idw_dma_resource_page {
 	void *cpu_address;
 	dma_addr_t dma_address;
 	u64 mapping_cookie;
+	bool unmapped;
+	bool freed;
 };
 
 /*
@@ -53,14 +60,17 @@ struct idw_dma_resource_page {
  */
 struct idw_dma_resource {
 	struct list_head link;
+	struct idw_dma_provider *provider;
 	u64 cookie;
 	u64 bytes;
 	u64 device_cookie;
 	u64 generation;
 	u32 page_count;
-	u32 mappings;
+	atomic_t mappings;
 	enum dma_data_direction direction;
 	struct idw_dma_resource_page *pages;
+	bool dma_unmapped;
+	bool pages_released;
 };
 
 /*
@@ -70,7 +80,8 @@ struct idw_dma_resource {
  * module alive through remove; the driver serializes provider use against
  * teardown. The provider intentionally does not pin the owner module because
  * a self-reference would prevent the driver's remove callback from running.
- * Fini releases any remaining page allocations.
+ * Fini refuses to release anything while a resource, page, or VMA reference
+ * remains; the caller must retain or quarantine the provider in that case.
  */
 struct idw_dma_provider {
 	struct device *dev;
@@ -82,13 +93,37 @@ struct idw_dma_provider {
 	u64 generation;
 	u64 next_cookie;
 	u64 next_mapping_cookie;
+	u64 resource_pages;
+	u64 mapped_pages;
+	u64 page_table_pages;
+	u64 quarantined_pages;
+	atomic_t vma_refs;
 	bool active;
+	bool removal_blocked;
+	s32 fail_alloc_at;
+	s32 fail_map_at;
+	bool fail_unmap;
+	bool fail_free;
+	bool fail_free_pt;
+};
+
+struct idw_dma_provider_stats {
+	u64 resources;
+	u64 resource_pages;
+	u64 mapped_pages;
+	u64 page_table_pages;
+	u64 vma_refs;
+	u64 quarantined_pages;
+	bool active;
+	bool removal_blocked;
 };
 
 int idw_dma_provider_init(struct idw_dma_provider *provider,
 			  struct device *dev, struct module *owner,
 			  u64 generation);
 int idw_dma_provider_fini(struct idw_dma_provider *provider);
+int idw_dma_provider_stats(struct idw_dma_provider *provider,
+			   struct idw_dma_provider_stats *stats);
 int idw_dma_page_alloc(struct idw_dma_provider *provider,
 		       struct idw_dma_page_info *info);
 int idw_dma_page_free(struct idw_dma_provider *provider,

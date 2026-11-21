@@ -123,6 +123,17 @@ int idw_hsw_ppgtt_map(struct idw_hsw_ppgtt_model *model,
                       uint64_t page_count);
 int idw_hsw_ppgtt_unmap(struct idw_hsw_ppgtt_model *model,
                         idw_gpuva va, uint64_t bytes);
+/* CPU-shadow query used by teardown retry after a partially failed unmap. */
+int idw_hsw_ppgtt_range_cleared(const struct idw_hsw_ppgtt_model *model,
+                                idw_gpuva va, uint64_t bytes,
+                                bool *cleared);
+/*
+ * Retries page-table synchronization after a failed map/unmap sync. The
+ * caller must have quiesced device access. Returns 0 only when the poison is
+ * cleared, -EIO when the poison was not caused by a failed sync, and the
+ * callback error when synchronization still fails.
+ */
+int idw_hsw_ppgtt_retry_sync(struct idw_hsw_ppgtt_model *model);
 int idw_hsw_ppgtt_translate(const struct idw_hsw_ppgtt_model *model,
                             idw_gpuva va,
                             struct idw_hsw_ppgtt_translation *translation);

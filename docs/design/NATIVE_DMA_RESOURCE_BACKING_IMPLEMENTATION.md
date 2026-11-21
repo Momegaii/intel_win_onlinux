@@ -36,6 +36,10 @@ Resource ioctls:
 - `IDW_DMA_TEST_IOCTL_SEGMENTS`: return the real DMA address, length, device
   scope, and mapping cookie for each page in a range.
 - `IDW_DMA_TEST_IOCTL_SYNC`: run the DMA sync direction on a resource range.
+- `IDW_DMA_TEST_IOCTL_STATS`: return provider resource/page/VMA/quarantine
+  counters.
+- `IDW_DMA_TEST_IOCTL_FAULT`: set test-only backing allocation or DMA mapping
+  failure indices.
 
 Page-table ioctls:
 
@@ -80,14 +84,21 @@ Lifetime rules:
 - `destroy_backing` refuses while bound and while a resource VMA is mapped.
 - `unbind` clears PTEs, completes the model invalidation, and only then marks
   the allocation unbound.
-- `close_all` refuses while allocations remain, destroys the PPGTT model with
-  hardware quiescence asserted, and frees page tables through the model's
-  callbacks.
-- The kernel provider also refuses `FREE` while `resource->mappings` is nonzero.
+- `close_all` refuses while allocations remain, proves PPGTT inactivity, then
+  destroys the model with hardware quiescence **not** asserted and frees page
+  tables through the model's callbacks.
+- The kernel provider refuses `FREE` while `resource->mappings` is nonzero and
+  refuses removal while any page, resource, or VMA reference remains.
+- A VMA holds a file reference, so `release` cannot run while the mapping is
+  live. VMA `open`/`close` also hold the module reference; removal therefore
+  waits or fails closed instead of invalidating a live mapping.
 
-`make native-dma-backend-test` runs the lifecycle through `MemoryManager`. It
-skips on a host without `/dev/idw-edu-dma`; the QEMU guest invokes the static
-build with `--require-device`, so a missing device is a failure there.
+`make native-dma-backend-test` runs the lifecycle through `MemoryManager`.
+`make native-dma-fault-test` injects create, page-table, mmap, sync, bind,
+unbind, and destroy failures, then checks retry, quarantine, counter drain, and
+live-VMA rejection. Both skip on a host without `/dev/idw-edu-dma`; the QEMU
+guest invokes the static builds with `--require-device`, so a missing device is
+a failure there.
 
 ## 4. QEMU evidence
 
@@ -103,12 +114,15 @@ Result: `QEMU exit status: 33` (isa-debug-exit success). The guest log contains:
 
 ```text
 IDW_QEMU_DMA: 3-page resource backing DMA, 39-bit validation, PPGTT PTE consumption, sync, and cleanup verified
+IDW_QEMU_DMA: backing allocation/mapping fault injection verified
+IDW_QEMU_DMA: provider removal refused outstanding refs and recovered after release
 PASS: native DMA backing, real DMA addresses, PPGTT translation, submission, and cleanup
-IDW_QEMU_DMA: remove freed outstanding provider allocations=yes result=0
+PASS: native DMA backend fault injection, teardown retry, VMA lifetime, and ownership counters
+IDW_QEMU_DMA: remove released all provider resources result=0
 IDW_QEMU_DMA: PASS: probe, page-table DMA, 32 DMA cycles, cleanup and remove completed
 ```
 
-Full log: `tests/qemu-dma/evidence-2026-11-20-native-dma-backend.log`.
+Full excerpts and log hashes: `tests/qemu-dma/STAGE3C_REMEDIATION_EVIDENCE.md`.
 
 ## 5. Boundaries
 

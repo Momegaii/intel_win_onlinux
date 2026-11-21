@@ -12,6 +12,7 @@
 #include <linux/miscdevice.h>
 #include <linux/mm.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -37,12 +38,13 @@
 #define IDW_EDU_DMA_CYCLES 32
 
 struct idw_edu_test {
+	struct device *dev;
 	void __iomem *bar;
 	struct idw_dma_provider provider;
-	struct idw_dma_page_info teardown_page;
 	struct idw_dma_pt_adapter pt_adapter;
 	struct miscdevice misc;
 	struct completion closed;
+	struct mutex ops_lock;
 	atomic_t open;
 	bool provider_ready;
 	bool pt_adapter_ready;
@@ -441,7 +443,9 @@ static int idw_edu_test_resource_backing(struct idw_edu_test *test)
 {
         struct idw_dma_resource source = {};
         struct idw_dma_resource destination = {};
+        struct idw_dma_resource directional = {};
         struct idw_dma_resource bad = {};
+        struct idw_dma_provider_stats stats = {};
         struct idw_dma_segment segments[4] = {};
         struct idw_dma_page table = {};
         struct idw_pt_memory_ops memory;
@@ -573,6 +577,46 @@ static int idw_edu_test_resource_backing(struct idw_edu_test *test)
         if (ret != -EXDEV)
                 goto bad_descriptor;
 
+        ret = idw_dma_resource_alloc(&test->provider, PAGE_SIZE,
+                                     DMA_TO_DEVICE, &directional);
+        if (ret)
+                goto bad_descriptor;
+        ret = idw_dma_resource_sync(&test->provider, &directional, 0, PAGE_SIZE,
+                                    DMA_FROM_DEVICE);
+        if (ret != -EINVAL)
+                goto free_directional;
+        ret = idw_dma_resource_sync(&test->provider, &directional, 0, PAGE_SIZE,
+                                    DMA_TO_DEVICE);
+        if (ret)
+                goto free_directional;
+        ret = idw_dma_resource_free(&test->provider, &directional);
+        if (ret)
+                goto bad_descriptor;
+        memset(&directional, 0, sizeof(directional));
+
+        for (i = 0; i < 3; i++) {
+                test->provider.fail_alloc_at = (s32)i;
+                ret = idw_dma_resource_alloc(&test->provider, 3 * PAGE_SIZE,
+                                             DMA_BIDIRECTIONAL, &bad);
+                test->provider.fail_alloc_at = -1;
+                if (ret != -ENOMEM)
+                        goto bad_descriptor;
+                memset(&bad, 0, sizeof(bad));
+
+                test->provider.fail_map_at = (s32)i;
+                ret = idw_dma_resource_alloc(&test->provider, 3 * PAGE_SIZE,
+                                             DMA_BIDIRECTIONAL, &bad);
+                test->provider.fail_map_at = -1;
+                if (ret != -EIO)
+                        goto bad_descriptor;
+                memset(&bad, 0, sizeof(bad));
+        }
+        ret = idw_dma_provider_stats(&test->provider, &stats);
+        if (ret || stats.resources != 2 || stats.resource_pages != 6 ||
+            stats.mapped_pages != 6 || stats.quarantined_pages)
+                goto bad_descriptor;
+        pr_info("IDW_QEMU_DMA: backing allocation/mapping fault injection verified\n");
+
         ret = idw_dma_pt_adapter_release_page(&test->pt_adapter, &table);
         if (ret)
                 goto free_both;
@@ -590,6 +634,15 @@ static int idw_edu_test_resource_backing(struct idw_edu_test *test)
 
 bad_descriptor:
         ret = -EINVAL;
+free_directional:
+        test->provider.fail_alloc_at = -1;
+        test->provider.fail_map_at = -1;
+        if (directional.pages) {
+                int release = idw_dma_resource_free(&test->provider,
+                                                    &directional);
+                if (!ret)
+                        ret = release;
+        }
 free_table:
         if (table.cpu_address)
                 (void)idw_dma_pt_adapter_release_page(&test->pt_adapter,
@@ -603,6 +656,65 @@ out:
         return ret;
 }
 
+
+static int idw_edu_test_provider_removal(struct idw_edu_test *test)
+{
+	struct idw_dma_provider local = {};
+	struct idw_dma_resource resource = {};
+	struct idw_dma_page_info page = {};
+	int ret;
+
+	ret = idw_dma_provider_init(&local, test->dev, THIS_MODULE, 1);
+	if (ret)
+		return ret;
+	ret = idw_dma_resource_alloc(&local, PAGE_SIZE, DMA_BIDIRECTIONAL,
+				     &resource);
+	if (ret)
+		goto fini;
+	atomic_inc(&local.vma_refs);
+	ret = idw_dma_provider_fini(&local);
+	if (ret != -EBUSY) {
+		ret = -EIO;
+		goto free_resource;
+	}
+	atomic_dec(&local.vma_refs);
+	ret = idw_dma_resource_free(&local, &resource);
+	if (ret)
+		goto fini;
+	ret = idw_dma_provider_fini(&local);
+	if (ret)
+		return ret;
+
+	memset(&local, 0, sizeof(local));
+	ret = idw_dma_provider_init(&local, test->dev, THIS_MODULE, 2);
+	if (ret)
+		return ret;
+	ret = idw_dma_page_alloc(&local, &page);
+	if (ret)
+		goto fini;
+	ret = idw_dma_provider_fini(&local);
+	if (ret != -EBUSY) {
+		ret = -EIO;
+		goto free_page;
+	}
+	ret = idw_dma_page_free(&local, &page);
+	if (ret)
+		goto fini;
+	ret = idw_dma_provider_fini(&local);
+	if (ret)
+		return ret;
+	pr_info("IDW_QEMU_DMA: provider removal refused outstanding refs and recovered after release\n");
+	return 0;
+
+free_page:
+	(void)idw_dma_page_free(&local, &page);
+	goto fini;
+free_resource:
+	(void)idw_dma_resource_free(&local, &resource);
+fini:
+	(void)idw_dma_provider_fini(&local);
+	return ret;
+}
 
 static struct idw_dma_resource *
 idw_edu_find_resource(struct idw_edu_test *test, u64 cookie)
@@ -642,16 +754,77 @@ static enum dma_data_direction idw_edu_test_direction(u32 direction)
         }
 }
 
+static bool idw_edu_vma_get(struct idw_dma_provider *provider)
+{
+        if (!provider || !try_module_get(THIS_MODULE))
+                return false;
+        atomic_inc(&provider->vma_refs);
+        return true;
+}
+
+static void idw_edu_vma_put(struct idw_dma_provider *provider)
+{
+        if (!provider)
+                return;
+        if (atomic_dec_if_positive(&provider->vma_refs) < 0)
+                return;
+        module_put(THIS_MODULE);
+}
+
+static void idw_edu_resource_vm_open(struct vm_area_struct *vma)
+{
+        struct idw_dma_resource *resource = vma->vm_private_data;
+
+        if (!resource)
+                return;
+        if (!idw_edu_vma_get(resource->provider)) {
+                vma->vm_private_data = NULL;
+                return;
+        }
+        atomic_inc(&resource->mappings);
+}
+
 static void idw_edu_resource_vm_close(struct vm_area_struct *vma)
 {
         struct idw_dma_resource *resource = vma->vm_private_data;
 
-        if (resource && resource->mappings)
-                --resource->mappings;
+        if (!resource)
+                return;
+        (void)atomic_dec_if_positive(&resource->mappings);
+        idw_edu_vma_put(resource->provider);
 }
 
 static const struct vm_operations_struct idw_edu_resource_vm_ops = {
+        .open = idw_edu_resource_vm_open,
         .close = idw_edu_resource_vm_close,
+};
+
+static void idw_edu_pt_vm_open(struct vm_area_struct *vma)
+{
+        struct idw_dma_provider_page *page = vma->vm_private_data;
+
+        if (!page)
+                return;
+        if (!idw_edu_vma_get(page->provider)) {
+                vma->vm_private_data = NULL;
+                return;
+        }
+        atomic_inc(&page->mappings);
+}
+
+static void idw_edu_pt_vm_close(struct vm_area_struct *vma)
+{
+        struct idw_dma_provider_page *page = vma->vm_private_data;
+
+        if (!page)
+                return;
+        (void)atomic_dec_if_positive(&page->mappings);
+        idw_edu_vma_put(page->provider);
+}
+
+static const struct vm_operations_struct idw_edu_pt_vm_ops = {
+        .open = idw_edu_pt_vm_open,
+        .close = idw_edu_pt_vm_close,
 };
 
 static int idw_edu_open(struct inode *inode, struct file *file)
@@ -684,23 +857,41 @@ static int idw_edu_mmap(struct file *file, struct vm_area_struct *vma)
         unsigned long pgoff = vma->vm_pgoff;
         u64 cookie;
         u32 i;
+        int ret = 0;
 
         if (!test || !test->provider_ready)
                 return -ENODEV;
 
+        mutex_lock(&test->ops_lock);
         if (pgoff >= IDW_DMA_TEST_PT_PGOFF_BASE) {
                 struct idw_dma_provider_page *page;
 
                 cookie = pgoff - IDW_DMA_TEST_PT_PGOFF_BASE;
                 page = idw_edu_find_page(test, cookie);
-                if (!page)
-                        return -ENOENT;
-                if (vma->vm_end - vma->vm_start != PAGE_SIZE)
-                        return -EINVAL;
+                if (!page) {
+                        ret = -ENOENT;
+                        goto out_unlock;
+                }
+                if (vma->vm_end - vma->vm_start != PAGE_SIZE) {
+                        ret = -EINVAL;
+                        goto out_unlock;
+                }
                 vma->vm_pgoff = 0;
-                return dma_mmap_coherent(test->provider.dev, vma,
-                                         page->cpu_address,
-                                         page->dma_address, PAGE_SIZE);
+                ret = dma_mmap_coherent(test->provider.dev, vma,
+                                        page->cpu_address,
+                                        page->dma_address, PAGE_SIZE);
+                if (ret)
+                        goto out_unlock;
+                vma->vm_ops = &idw_edu_pt_vm_ops;
+                vma->vm_private_data = page;
+                vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP);
+                if (!idw_edu_vma_get(page->provider)) {
+                        vma->vm_private_data = NULL;
+                        ret = -ENODEV;
+                        goto out_unlock;
+                }
+                atomic_inc(&page->mappings);
+                goto out_unlock;
         }
 
         cookie = pgoff;
@@ -708,30 +899,43 @@ static int idw_edu_mmap(struct file *file, struct vm_area_struct *vma)
                 struct idw_dma_resource *resource =
                         idw_edu_find_resource(test, cookie);
 
-                if (!resource)
-                        return -ENOENT;
-                if (vma->vm_end - vma->vm_start != resource->bytes)
-                        return -EINVAL;
-                if (resource->mappings)
-                        return -EBUSY;
-                vma->vm_pgoff = 0;
-                vma->vm_ops = &idw_edu_resource_vm_ops;
-                vma->vm_private_data = resource;
-                vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP);
+                if (!resource) {
+                        ret = -ENOENT;
+                        goto out_unlock;
+                }
+                if (vma->vm_end - vma->vm_start != resource->bytes) {
+                        ret = -EINVAL;
+                        goto out_unlock;
+                }
+                vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
                 for (i = 0; i < resource->page_count; i++) {
                         if (vm_insert_page(vma,
                                            vma->vm_start + (unsigned long)i *
                                                    PAGE_SIZE,
-                                           resource->pages[i].page))
-                                return -EFAULT;
+                                           resource->pages[i].page)) {
+                                ret = -EFAULT;
+                                goto out_unlock;
+                        }
                 }
-                resource->mappings = 1;
+                vma->vm_pgoff = 0;
+                vma->vm_ops = &idw_edu_resource_vm_ops;
+                vma->vm_private_data = resource;
+                vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP);
+                if (!idw_edu_vma_get(resource->provider)) {
+                        vma->vm_private_data = NULL;
+                        ret = -ENODEV;
+                        goto out_unlock;
+                }
+                atomic_inc(&resource->mappings);
         }
-        return 0;
+
+out_unlock:
+        mutex_unlock(&test->ops_lock);
+        return ret;
 }
 
-static long idw_edu_ioctl(struct file *file, unsigned int cmd,
-                          unsigned long arg)
+static long idw_edu_ioctl_locked(struct file *file, unsigned int cmd,
+                                 unsigned long arg)
 {
         struct idw_edu_test *test = file->private_data;
         void __user *user = (void __user *)arg;
@@ -937,9 +1141,68 @@ static long idw_edu_ioctl(struct file *file, unsigned int cmd,
                                            DMA_BIDIRECTIONAL);
                 return 0;
         }
+        case IDW_DMA_TEST_IOCTL_STATS: {
+                struct idw_dma_test_stats output = {};
+                struct idw_dma_provider_stats stats;
+                int ret;
+
+                ret = idw_dma_provider_stats(&test->provider, &stats);
+                if (ret)
+                        return ret;
+                output.size = sizeof(output);
+                output.resources = stats.resources;
+                output.resource_pages = stats.resource_pages;
+                output.mapped_pages = stats.mapped_pages;
+                output.page_table_pages = stats.page_table_pages;
+                output.vma_refs = stats.vma_refs;
+                output.quarantined_pages = stats.quarantined_pages;
+                output.active = stats.active;
+                output.removal_blocked = stats.removal_blocked;
+                if (copy_to_user(user, &output, sizeof(output)))
+                        return -EFAULT;
+                return 0;
+        }
+        case IDW_DMA_TEST_IOCTL_FAULT: {
+                struct idw_dma_test_fault request;
+
+                if (copy_from_user(&request, user, sizeof(request)))
+                        return -EFAULT;
+                if (request.size != sizeof(request))
+                        return -EINVAL;
+                if (request.alloc_fail_at < -1 || request.map_fail_at < -1 ||
+                    (request.flags & ~(IDW_DMA_TEST_FAULT_UNMAP |
+                                       IDW_DMA_TEST_FAULT_FREE |
+                                       IDW_DMA_TEST_FAULT_FREE_PT)))
+                        return -EINVAL;
+                mutex_lock(&test->provider.lock);
+                test->provider.fail_alloc_at = request.alloc_fail_at;
+                test->provider.fail_map_at = request.map_fail_at;
+                test->provider.fail_unmap =
+                        request.flags & IDW_DMA_TEST_FAULT_UNMAP;
+                test->provider.fail_free =
+                        request.flags & IDW_DMA_TEST_FAULT_FREE;
+                test->provider.fail_free_pt =
+                        request.flags & IDW_DMA_TEST_FAULT_FREE_PT;
+                mutex_unlock(&test->provider.lock);
+                return 0;
+        }
         default:
                 return -ENOTTY;
         }
+}
+
+static long idw_edu_ioctl(struct file *file, unsigned int cmd,
+                          unsigned long arg)
+{
+        struct idw_edu_test *test = file->private_data;
+        long ret;
+
+        if (!test || !test->provider_ready)
+                return -ENODEV;
+        mutex_lock(&test->ops_lock);
+        ret = idw_edu_ioctl_locked(file, cmd, arg);
+        mutex_unlock(&test->ops_lock);
+        return ret;
 }
 
 static const struct file_operations idw_edu_fops = {
@@ -964,6 +1227,7 @@ static int idw_edu_probe(struct pci_dev *pdev,
 	test = kzalloc(sizeof(*test), GFP_KERNEL);
 	if (!test)
 		return -ENOMEM;
+	test->dev = &pdev->dev;
 	ret = pci_enable_device_mem(pdev);
 	if (ret)
 		goto fail_state;
@@ -993,10 +1257,13 @@ static int idw_edu_probe(struct pci_dev *pdev,
 		ret = -EINVAL;
 		goto fail_iomap;
 	}
-	ret = dma_set_mask_and_coherent(&pdev->dev, IDW_DMA_ADDRESS_MASK);
+	ret = dma_set_mask(&pdev->dev, IDW_DMA_RESOURCE_ADDRESS_MASK);
 	if (ret)
 		goto fail_iomap;
-	pr_info("IDW_QEMU_DMA: rejected 32-bit mask; accepted configured 40-bit mask\n");
+	ret = dma_set_coherent_mask(&pdev->dev, IDW_DMA_ADDRESS_MASK);
+	if (ret)
+		goto fail_iomap;
+	pr_info("IDW_QEMU_DMA: rejected 32-bit mask; accepted 39-bit streaming and 40-bit coherent masks\n");
 
 	pci_set_master(pdev);
 	ret = idw_dma_provider_init(&test->provider, &pdev->dev,
@@ -1016,11 +1283,7 @@ static int idw_edu_probe(struct pci_dev *pdev,
 	ret = idw_edu_test_resource_backing(test);
 	if (ret)
 		goto fail_provider;
-
-	ret = idw_dma_page_alloc(&test->provider, &test->teardown_page);
-	if (ret)
-		goto fail_provider;
-	ret = idw_edu_check_page(&test->teardown_page);
+	ret = idw_edu_test_provider_removal(test);
 	if (ret)
 		goto fail_provider;
 
@@ -1030,6 +1293,7 @@ static int idw_edu_probe(struct pci_dev *pdev,
 	test->misc.parent = &pdev->dev;
 	test->misc.mode = 0600;
 	init_completion(&test->closed);
+	mutex_init(&test->ops_lock);
 	atomic_set(&test->open, 0);
 	ret = misc_register(&test->misc);
 	if (ret)
@@ -1040,7 +1304,7 @@ static int idw_edu_probe(struct pci_dev *pdev,
 	pci_set_drvdata(pdev, test);
 	idw_edu_remove_result = -EINPROGRESS;
 	idw_edu_test_result = 0;
-	pr_info("IDW_QEMU_DMA: probe passed; retained one page to verify remove cleanup\n");
+	pr_info("IDW_QEMU_DMA: probe passed; no outstanding provider pages retained\n");
 	return 0;
 
 fail_provider:
@@ -1081,6 +1345,7 @@ static void idw_edu_remove(struct pci_dev *pdev)
 {
 	struct idw_edu_test *test = pci_get_drvdata(pdev);
 	bool outstanding;
+	bool quarantined;
 	int adapter_ret = 0;
 	int ret;
 
@@ -1093,27 +1358,40 @@ static void idw_edu_remove(struct pci_dev *pdev)
 			wait_for_completion(&test->closed);
 		test->misc_ready = false;
 	}
+	mutex_lock(&test->ops_lock);
 	if (test->pt_adapter_ready) {
 		adapter_ret = idw_dma_pt_adapter_fini(&test->pt_adapter);
 		test->pt_adapter_ready = false;
 	}
 	outstanding = !list_empty(&test->provider.pages) ||
-		      !list_empty(&test->provider.resources);
+		      !list_empty(&test->provider.resources) ||
+		      atomic_read(&test->provider.vma_refs);
 	ret = idw_dma_provider_fini(&test->provider);
+	quarantined = adapter_ret || ret || outstanding;
+	if (quarantined) {
+		test->provider.removal_blocked = true;
+		test->provider_ready = false;
+		mutex_unlock(&test->ops_lock);
+		pci_clear_master(pdev);
+		pci_iounmap(pdev, test->bar);
+		pci_release_regions(pdev);
+		pci_disable_device(pdev);
+		pci_set_drvdata(pdev, NULL);
+		idw_edu_remove_result = -EBUSY;
+		pr_err("IDW_QEMU_DMA: remove quarantined outstanding resources adapter=%d provider=%d result=%d\n",
+		       adapter_ret, ret, idw_edu_remove_result);
+		return;
+	}
 	test->provider_ready = false;
+	mutex_unlock(&test->ops_lock);
 	pci_clear_master(pdev);
 	pci_iounmap(pdev, test->bar);
 	pci_release_regions(pdev);
 	pci_disable_device(pdev);
 	pci_set_drvdata(pdev, NULL);
 	kfree(test);
-	if (adapter_ret)
-		idw_edu_remove_result = adapter_ret;
-	else
-		idw_edu_remove_result =
-			outstanding && !ret ? 0 : (ret ? ret : -EINVAL);
-	pr_info("IDW_QEMU_DMA: remove freed outstanding provider allocations=%s result=%d\n",
-		outstanding ? "yes" : "no", idw_edu_remove_result);
+	idw_edu_remove_result = 0;
+	pr_info("IDW_QEMU_DMA: remove released all provider resources result=0\n");
 }
 
 static const struct pci_device_id idw_edu_ids[] = {

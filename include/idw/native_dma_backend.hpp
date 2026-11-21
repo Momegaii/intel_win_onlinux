@@ -21,6 +21,51 @@ namespace idw {
  */
 class NativeDmaMemoryBackend {
 public:
+    enum class ResourceState : uint32_t {
+        New = 1,
+        VaReserved,
+        BackingAllocated,
+        DmaMapped,
+        PgttPopulated,
+        PtSynchronized,
+        ReadyInactive,
+        Destroying,
+        Quarantined,
+        Released,
+    };
+
+    struct OwnershipCounters {
+        uint64_t allocated_pages = 0;
+        uint64_t mapped_pages = 0;
+        uint64_t populated_ptes = 0;
+        uint64_t pt_pages = 0;
+        uint64_t va_reservations = 0;
+        uint64_t quarantined_pages = 0;
+    };
+
+    struct TeardownProgress {
+        bool ptes_cleared = false;
+        bool ptes_accounted = false;
+        bool invalidation_done = false;
+        bool va_released = false;
+        bool dma_unmapped = false;
+        bool backing_released = false;
+        bool complete = false;
+    };
+
+    struct FaultPlan {
+        int create_fail_at = -1;
+        int page_table_fail_at = -1;
+        bool sync_page_table_fail = false;
+        bool bind_fail_after_map = false;
+        bool unbind_fail_invalidation = false;
+        bool unbind_fail_sync = false;
+        bool destroy_fail = false;
+        bool destroy_fail_after_unmap = false;
+        bool free_page_table_fail = false;
+        bool mmap_fail = false;
+    };
+
     explicit NativeDmaMemoryBackend(
         const char *device_path = IDW_DMA_TEST_DEVICE);
     NativeDmaMemoryBackend(const NativeDmaMemoryBackend&) = delete;
@@ -39,6 +84,10 @@ public:
 
     size_t allocation_count() const;
     size_t page_table_count() const;
+    OwnershipCounters counters() const;
+    int allocation_state(uint64_t backing, ResourceState& state) const;
+    int teardown_progress(uint64_t backing, TeardownProgress& progress) const;
+    void set_fault_plan(const FaultPlan& plan);
 
 private:
     struct Allocation {
@@ -48,7 +97,16 @@ private:
         uint64_t bytes;
         void *address;
         bool bound;
+        bool ptes_cleared;
+        bool ptes_accounted;
+        bool invalidation_done;
+        bool va_released;
+        bool dma_unmapped;
+        bool backing_released;
+        bool release_safe;
         idw_gpuva va;
+        ResourceState state = ResourceState::New;
+        uint32_t page_count = 0;
     };
 
     struct PageTable {
@@ -58,6 +116,9 @@ private:
         uint64_t dma_address;
         uint64_t bytes;
         void *address;
+        bool unmapped = false;
+        bool quarantined = false;
+        bool released = false;
     };
 
     struct Directory {
@@ -74,6 +135,12 @@ private:
     Allocation *find_allocation(uint64_t backing);
     const Allocation *find_allocation(uint64_t backing) const;
     PageTable *find_page_table(uint64_t cookie);
+    bool transition(Allocation& allocation, ResourceState next);
+    void quarantine(Allocation& allocation);
+    int check_inactive() const;
+    int complete_unbind(Allocation& allocation);
+    static bool add_counter(uint64_t& counter, uint64_t amount);
+    static bool sub_counter(uint64_t& counter, uint64_t amount);
     int create_backing_cb_impl(uint64_t bytes, uint64_t *backing);
     int destroy_backing_cb_impl(uint64_t backing);
     int bind_cb_impl(uint64_t backing, idw_gpuva requested_va, uint64_t bytes,
@@ -90,6 +157,7 @@ private:
                                 uint32_t value);
     int alloc_page_table_page(struct idw_dma_page *page);
     void free_page_table_page(struct idw_dma_page *page);
+    int release_remaining_page_tables();
     int sync_page_table_for_device(const struct idw_dma_page *page,
                                    uint32_t offset, uint32_t bytes);
     int alloc_directory(struct idw_hsw_ppgtt_directory *directory);
@@ -147,6 +215,8 @@ private:
     Directory directory_;
     std::vector<Allocation> allocations_;
     std::vector<PageTable> page_tables_;
+    OwnershipCounters counters_;
+    FaultPlan faults_;
 };
 
 } // namespace idw

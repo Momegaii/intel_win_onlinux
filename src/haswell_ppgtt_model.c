@@ -34,6 +34,7 @@ struct idw_hsw_ppgtt_model {
     uint64_t dirty_end;
     bool invalidation_pending;
     bool poisoned;
+    bool sync_failed;
     bool active;
 };
 
@@ -486,8 +487,10 @@ int idw_hsw_ppgtt_map(struct idw_hsw_ppgtt_model *model,
         ret = idw_hsw_ppgtt_encode_pte(dma_pages[i].dma_address,
                                        IDW_HSW_PPGTT_PTE_CACHE_UC,
                                        &pte_entry);
-        if (ret)
+        if (ret) {
+            model->poisoned = true;
             return ret;
+        }
         ((uint32_t *)model->tables[pde]->page.cpu_address)[pte] = pte_entry;
         model->tables[pde]->empty = false;
         sync_needed[pde] = true;
@@ -497,6 +500,7 @@ int idw_hsw_ppgtt_map(struct idw_hsw_ppgtt_model *model,
             continue;
         ret = sync_table(model, model->tables[i]);
         if (ret) {
+            model->sync_failed = true;
             model->poisoned = true;
             return ret;
         }
@@ -557,17 +561,80 @@ int idw_hsw_ppgtt_unmap(struct idw_hsw_ppgtt_model *model,
             model->tables[pde]->empty = pt_empty(model->tables[pde]);
             sync_needed[pde] = true;
         }
+        ret = mark_dirty(model, va, bytes);
+        if (ret) {
+            model->poisoned = true;
+            return ret;
+        }
         for (i = 0; i < IDW_HSW_PPGTT_PDES; ++i) {
             if (!sync_needed[i])
                 continue;
             ret = sync_table(model, model->tables[i]);
             if (ret) {
+                model->sync_failed = true;
                 model->poisoned = true;
                 return ret;
             }
         }
     }
-    return mark_dirty(model, va, bytes);
+    return 0;
+}
+
+int idw_hsw_ppgtt_range_cleared(const struct idw_hsw_ppgtt_model *model,
+                                idw_gpuva va, uint64_t bytes,
+                                bool *cleared)
+{
+    uint64_t page_count;
+    uint64_t i;
+    int ret;
+
+    if (!model || !cleared)
+        return -EINVAL;
+    ret = range_valid(va, bytes);
+    if (ret)
+        return ret;
+    *cleared = true;
+    page_count = bytes / IDW_HASWELL_PPGTT_PAGE_SIZE;
+    for (i = 0; i < page_count; ++i) {
+        uint64_t page_va = va + i * IDW_HASWELL_PPGTT_PAGE_SIZE;
+        uint32_t pde = (uint32_t)(page_va >> IDW_HASWELL_PPGTT_PDE_SHIFT);
+        uint32_t pte = (uint32_t)((page_va >> 12) & 0x3ffu);
+
+        if (model->tables[pde] &&
+            (((uint32_t *)model->tables[pde]->page.cpu_address)[pte] &
+             IDW_HSW_PPGTT_PTE_VALID)) {
+            *cleared = false;
+            break;
+        }
+    }
+    return 0;
+}
+
+int idw_hsw_ppgtt_retry_sync(struct idw_hsw_ppgtt_model *model)
+{
+    bool synced = false;
+    uint32_t i;
+    int ret;
+
+    if (!model)
+        return -EINVAL;
+    if (!model->poisoned)
+        return 0;
+    if (!model->sync_failed)
+        return -EIO;
+    for (i = 0; i < IDW_HSW_PPGTT_PDES; ++i) {
+        if (!model->tables[i])
+            continue;
+        ret = sync_table(model, model->tables[i]);
+        if (ret)
+            return ret;
+        synced = true;
+    }
+    if (!synced)
+        return -EIO;
+    model->poisoned = false;
+    model->sync_failed = false;
+    return 0;
 }
 
 int idw_hsw_ppgtt_translate(const struct idw_hsw_ppgtt_model *model,

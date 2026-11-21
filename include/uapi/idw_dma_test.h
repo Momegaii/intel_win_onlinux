@@ -74,6 +74,30 @@ struct idw_dma_test_sync {
 	__u64 bytes;
 };
 
+struct idw_dma_test_stats {
+	__u32 size;
+	__u32 reserved;
+	__u64 resources;
+	__u64 resource_pages;
+	__u64 mapped_pages;
+	__u64 page_table_pages;
+	__u64 vma_refs;
+	__u64 quarantined_pages;
+	__u32 active;
+	__u32 removal_blocked;
+};
+
+#define IDW_DMA_TEST_FAULT_UNMAP 0x1u
+#define IDW_DMA_TEST_FAULT_FREE 0x2u
+#define IDW_DMA_TEST_FAULT_FREE_PT 0x4u
+
+struct idw_dma_test_fault {
+	__u32 size;
+	__s32 alloc_fail_at;
+	__s32 map_fail_at;
+	__u32 flags;
+};
+
 #define IDW_DMA_TEST_IOCTL_ALLOC \
 	_IOWR(IDW_DMA_TEST_IOCTL_MAGIC, 0x00, struct idw_dma_test_alloc)
 #define IDW_DMA_TEST_IOCTL_FREE \
@@ -88,5 +112,9 @@ struct idw_dma_test_sync {
 	_IOWR(IDW_DMA_TEST_IOCTL_MAGIC, 0x05, struct idw_dma_test_sync)
 #define IDW_DMA_TEST_IOCTL_SYNC_PT \
 	_IOWR(IDW_DMA_TEST_IOCTL_MAGIC, 0x06, struct idw_dma_test_pt)
+#define IDW_DMA_TEST_IOCTL_STATS \
+	_IOWR(IDW_DMA_TEST_IOCTL_MAGIC, 0x07, struct idw_dma_test_stats)
+#define IDW_DMA_TEST_IOCTL_FAULT \
+	_IOWR(IDW_DMA_TEST_IOCTL_MAGIC, 0x08, struct idw_dma_test_fault)
 
 #endif

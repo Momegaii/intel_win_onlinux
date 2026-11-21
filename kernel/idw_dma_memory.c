@@ -30,7 +30,7 @@ int idw_dma_provider_init(struct idw_dma_provider *provider,
 		return -EBUSY;
 	if (!idw_dma_device_owned(dev, owner))
 		return -EPERM;
-	if (dma_get_mask(dev) < IDW_DMA_ADDRESS_MASK ||
+	if (dma_get_mask(dev) < IDW_DMA_RESOURCE_ADDRESS_MASK ||
 	    dev->coherent_dma_mask < IDW_DMA_ADDRESS_MASK)
 		return -EIO;
 	cookie = atomic64_inc_return(&idw_next_device_cookie);
@@ -50,33 +50,65 @@ int idw_dma_provider_init(struct idw_dma_provider *provider,
 	mutex_init(&provider->lock);
 	INIT_LIST_HEAD(&provider->pages);
 	INIT_LIST_HEAD(&provider->resources);
+	atomic_set(&provider->vma_refs, 0);
+	provider->fail_alloc_at = -1;
+	provider->fail_map_at = -1;
+	provider->fail_unmap = false;
+	provider->fail_free = false;
+	provider->fail_free_pt = false;
 	provider->active = true;
 	return 0;
 }
 EXPORT_SYMBOL_GPL(idw_dma_provider_init);
 
-static void idw_dma_resource_release_pages(struct idw_dma_provider *provider,
-					   struct idw_dma_resource *resource)
+static int idw_dma_resource_unmap_pages(struct idw_dma_provider *provider,
+					struct idw_dma_resource *resource)
 {
 	u32 i;
 
-	if (!resource || !resource->pages)
-		return;
+	if (resource->dma_unmapped)
+		return 0;
+	if (!resource->pages)
+		return -EIO;
+	if (provider->fail_unmap)
+		return -EIO;
 	for (i = 0; i < resource->page_count; i++) {
-		if (!resource->pages[i].page)
+		if (!resource->pages[i].page || resource->pages[i].unmapped)
 			continue;
 		dma_unmap_page(provider->dev, resource->pages[i].dma_address,
 			       PAGE_SIZE, resource->direction);
+		resource->pages[i].unmapped = true;
+	}
+	resource->dma_unmapped = true;
+	return 0;
+}
+
+static int idw_dma_resource_free_pages(struct idw_dma_provider *provider,
+				       struct idw_dma_resource *resource)
+{
+	u32 i;
+
+	if (resource->pages_released)
+		return 0;
+	if (!resource->pages)
+		return -EIO;
+	if (provider->fail_free)
+		return -EIO;
+	for (i = 0; i < resource->page_count; i++) {
+		if (!resource->pages[i].page || resource->pages[i].freed)
+			continue;
 		__free_pages(resource->pages[i].page, 0);
+		resource->pages[i].page = NULL;
+		resource->pages[i].freed = true;
 	}
 	kfree(resource->pages);
 	resource->pages = NULL;
+	resource->pages_released = true;
+	return 0;
 }
 
 int idw_dma_provider_fini(struct idw_dma_provider *provider)
 {
-	struct idw_dma_provider_page *page, *next;
-	struct idw_dma_resource *resource, *resource_next;
 	struct device *dev;
 
 	if (!provider)
@@ -87,20 +119,18 @@ int idw_dma_provider_fini(struct idw_dma_provider *provider)
 		mutex_unlock(&provider->lock);
 		return -EINVAL;
 	}
+	if (!list_empty(&provider->pages) ||
+	    !list_empty(&provider->resources) ||
+	    atomic_read(&provider->vma_refs) ||
+	    provider->resource_pages || provider->mapped_pages ||
+	    provider->page_table_pages || provider->quarantined_pages) {
+		provider->removal_blocked = true;
+		mutex_unlock(&provider->lock);
+		return -EBUSY;
+	}
+	provider->removal_blocked = false;
 	provider->active = false;
 	dev = provider->dev;
-	list_for_each_entry_safe(page, next, &provider->pages, link) {
-		list_del(&page->link);
-		dma_free_coherent(dev, PAGE_SIZE, page->cpu_address,
-				  page->dma_address);
-		kfree(page);
-	}
-	list_for_each_entry_safe(resource, resource_next, &provider->resources,
-				 link) {
-		list_del(&resource->link);
-		idw_dma_resource_release_pages(provider, resource);
-		memset(resource, 0, sizeof(*resource));
-	}
 	provider->dev = NULL;
 	provider->owner = NULL;
 	mutex_unlock(&provider->lock);
@@ -109,6 +139,35 @@ int idw_dma_provider_fini(struct idw_dma_provider *provider)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(idw_dma_provider_fini);
+
+int idw_dma_provider_stats(struct idw_dma_provider *provider,
+			   struct idw_dma_provider_stats *stats)
+{
+	struct idw_dma_resource *resource;
+	struct idw_dma_provider_page *page;
+	u64 resources = 0;
+	u64 pages = 0;
+
+	if (!provider || !stats)
+		return -EINVAL;
+
+	mutex_lock(&provider->lock);
+	list_for_each_entry(resource, &provider->resources, link)
+		resources++;
+	list_for_each_entry(page, &provider->pages, link)
+		pages++;
+	stats->resources = resources;
+	stats->resource_pages = provider->resource_pages;
+	stats->mapped_pages = provider->mapped_pages;
+	stats->page_table_pages = pages;
+	stats->vma_refs = atomic_read(&provider->vma_refs);
+	stats->quarantined_pages = provider->quarantined_pages;
+	stats->active = provider->active;
+	stats->removal_blocked = provider->removal_blocked;
+	mutex_unlock(&provider->lock);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(idw_dma_provider_stats);
 
 int idw_dma_page_alloc(struct idw_dma_provider *provider,
 		       struct idw_dma_page_info *info)
@@ -151,10 +210,13 @@ int idw_dma_page_alloc(struct idw_dma_provider *provider,
 	}
 
 	INIT_LIST_HEAD(&page->link);
+	page->provider = provider;
 	page->cpu_address = cpu_address;
 	page->dma_address = dma_address;
 	page->cookie = provider->next_cookie++;
+	atomic_set(&page->mappings, 0);
 	list_add_tail(&page->link, &provider->pages);
+	provider->page_table_pages++;
 	info->cpu_address = cpu_address;
 	info->dma_address = dma_address;
 	info->bytes = PAGE_SIZE;
@@ -185,6 +247,10 @@ int idw_dma_page_free(struct idw_dma_provider *provider,
 		ret = -ENODEV;
 		goto out_unlock;
 	}
+	if (provider->fail_free_pt) {
+		ret = -EIO;
+		goto out_unlock;
+	}
 	if (info->bytes != PAGE_SIZE ||
 	    info->device_cookie != provider->device_cookie ||
 	    info->generation != provider->generation) {
@@ -200,7 +266,14 @@ int idw_dma_page_free(struct idw_dma_provider *provider,
 			ret = -EINVAL;
 			goto out_unlock;
 		}
+		if (atomic_read(&page->mappings)) {
+			ret = -EBUSY;
+			goto out_unlock;
+		}
 		list_del(&page->link);
+		if (provider->page_table_pages)
+			provider->page_table_pages--;
+		page->provider = NULL;
 		dma_free_coherent(provider->dev, PAGE_SIZE, page->cpu_address,
 				  page->dma_address);
 		kfree(page);
@@ -256,6 +329,10 @@ int idw_dma_resource_alloc(struct idw_dma_provider *provider, u64 bytes,
 		void *cpu_address;
 		dma_addr_t dma_address;
 
+		if (provider->fail_alloc_at == (s32)i) {
+			ret = -ENOMEM;
+			goto free_pages;
+		}
 		page = alloc_page(GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN);
 		if (!page) {
 			ret = -ENOMEM;
@@ -265,6 +342,11 @@ int idw_dma_resource_alloc(struct idw_dma_provider *provider, u64 bytes,
 		if (!cpu_address) {
 			__free_pages(page, 0);
 			ret = -ENOMEM;
+			goto free_pages;
+		}
+		if (provider->fail_map_at == (s32)i) {
+			__free_pages(page, 0);
+			ret = -EIO;
 			goto free_pages;
 		}
 		dma_address = dma_map_page(provider->dev, page, 0, PAGE_SIZE,
@@ -289,6 +371,7 @@ int idw_dma_resource_alloc(struct idw_dma_provider *provider, u64 bytes,
 		pages[i].mapping_cookie = provider->next_mapping_cookie++;
 	}
 
+	resource->provider = provider;
 	resource->cookie = provider->next_cookie++;
 	resource->bytes = (u64)page_count * PAGE_SIZE;
 	resource->device_cookie = provider->device_cookie;
@@ -296,7 +379,10 @@ int idw_dma_resource_alloc(struct idw_dma_provider *provider, u64 bytes,
 	resource->page_count = page_count;
 	resource->direction = direction;
 	resource->pages = pages;
+	atomic_set(&resource->mappings, 0);
 	list_add_tail(&resource->link, &provider->resources);
+	provider->resource_pages += page_count;
+	provider->mapped_pages += page_count;
 	mutex_unlock(&provider->lock);
 	return 0;
 
@@ -323,7 +409,8 @@ int idw_dma_resource_segments(const struct idw_dma_resource *resource,
 	u32 i;
 
 	if (!resource || !segments || !segment_count || !bytes ||
-	    !resource->pages || !resource->page_count)
+	    !resource->pages || !resource->page_count ||
+	    resource->dma_unmapped || resource->pages_released)
 		return -EINVAL;
 	if ((offset & (PAGE_SIZE - 1)) || (bytes & (PAGE_SIZE - 1)))
 		return -EINVAL;
@@ -350,6 +437,17 @@ int idw_dma_resource_segments(const struct idw_dma_resource *resource,
 }
 EXPORT_SYMBOL_GPL(idw_dma_resource_segments);
 
+static bool idw_dma_direction_compatible(enum dma_data_direction mapping,
+					 enum dma_data_direction requested)
+{
+	if (requested != DMA_TO_DEVICE && requested != DMA_FROM_DEVICE &&
+	    requested != DMA_BIDIRECTIONAL)
+		return false;
+	if (mapping == DMA_BIDIRECTIONAL)
+		return true;
+	return mapping == requested;
+}
+
 int idw_dma_resource_sync(struct idw_dma_provider *provider,
 			  const struct idw_dma_resource *resource,
 			  u64 offset, u64 bytes,
@@ -362,8 +460,9 @@ int idw_dma_resource_sync(struct idw_dma_provider *provider,
 
 	if (!provider || !resource || !resource->cookie || !resource->pages)
 		return -EINVAL;
-	if (direction != DMA_TO_DEVICE && direction != DMA_FROM_DEVICE &&
-	    direction != DMA_BIDIRECTIONAL)
+	if (resource->dma_unmapped)
+		return -ENODEV;
+	if (!idw_dma_direction_compatible(resource->direction, direction))
 		return -EINVAL;
 	if (offset > resource->bytes || bytes > resource->bytes - offset)
 		return -ERANGE;
@@ -394,13 +493,11 @@ int idw_dma_resource_sync(struct idw_dma_provider *provider,
 		if (direction == DMA_TO_DEVICE ||
 		    direction == DMA_BIDIRECTIONAL)
 			dma_sync_single_for_device(provider->dev, dma_address,
-						   (size_t)chunk,
-						   resource->direction);
+						   (size_t)chunk, direction);
 		if (direction == DMA_FROM_DEVICE ||
 		    direction == DMA_BIDIRECTIONAL)
 			dma_sync_single_for_cpu(provider->dev, dma_address,
-						(size_t)chunk,
-						resource->direction);
+						(size_t)chunk, direction);
 		remaining -= chunk;
 		++index;
 		page_offset = 0;
@@ -448,13 +545,26 @@ int idw_dma_resource_free(struct idw_dma_provider *provider,
 		ret = -EINVAL;
 		goto out_unlock;
 	}
-	if (entry->mappings) {
+	if (atomic_read(&entry->mappings)) {
 		ret = -EBUSY;
 		goto out_unlock;
 	}
 
-	idw_dma_resource_release_pages(provider, entry);
+	ret = idw_dma_resource_unmap_pages(provider, entry);
+	if (ret)
+		goto out_unlock;
+	ret = idw_dma_resource_free_pages(provider, entry);
+	if (ret)
+		goto out_unlock;
+	if (provider->resource_pages < entry->page_count ||
+	    provider->mapped_pages < entry->page_count) {
+		ret = -EIO;
+		goto out_unlock;
+	}
+	provider->resource_pages -= entry->page_count;
+	provider->mapped_pages -= entry->page_count;
 	list_del(&entry->link);
+	entry->provider = NULL;
 	memset(entry, 0, sizeof(*entry));
 
 out_unlock:

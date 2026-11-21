@@ -43,6 +43,12 @@ int main(int argc, char **argv)
     CHECK(ret == 0);
     CHECK(handle != 0);
     CHECK(backend.allocation_count() == 1);
+    CHECK(backend.counters().allocated_pages == 3);
+    CHECK(backend.counters().mapped_pages == 3);
+    CHECK(backend.counters().populated_ptes == 0);
+    CHECK(backend.counters().pt_pages == 0);
+    CHECK(backend.counters().va_reservations == 0);
+    CHECK(backend.counters().quarantined_pages == 0);
 
     uint64_t backing = 0;
     uint64_t bytes = 0;
@@ -52,11 +58,19 @@ int main(int argc, char **argv)
     CHECK(bytes == 3 * 4096);
     CHECK(backing != 0);
     CHECK(cookie == backing);
+    idw::NativeDmaMemoryBackend::ResourceState state;
+    CHECK(backend.allocation_state(backing, state) == 0);
+    CHECK(state == idw::NativeDmaMemoryBackend::ResourceState::BackingAllocated);
 
     idw_gpuva va = 0;
     ret = manager.bind(handle, 0x20000, va);
     CHECK(ret == 0);
     CHECK(va == 0x20000);
+    CHECK(backend.allocation_state(backing, state) == 0);
+    CHECK(state == idw::NativeDmaMemoryBackend::ResourceState::ReadyInactive);
+    CHECK(backend.counters().populated_ptes == 3);
+    CHECK(backend.counters().va_reservations == 1);
+    CHECK(backend.counters().quarantined_pages == 0);
 
     idw_gpuva duplicate_va = 0;
     ret = manager.bind(handle, 0x30000, duplicate_va);
@@ -100,9 +114,17 @@ int main(int argc, char **argv)
 
     ret = manager.unbind(handle);
     CHECK(ret == 0);
+    CHECK(backend.allocation_state(backing, state) == 0);
+    CHECK(state == idw::NativeDmaMemoryBackend::ResourceState::BackingAllocated);
+    CHECK(backend.counters().populated_ptes == 0);
+    CHECK(backend.counters().va_reservations == 0);
+    CHECK(backend.counters().quarantined_pages == 0);
     ret = manager.destroy(handle);
     CHECK(ret == 0);
+    CHECK(manager.destroy(handle) == -ENOENT);
     CHECK(backend.allocation_count() == 0);
+    CHECK(backend.counters().allocated_pages == 0);
+    CHECK(backend.counters().mapped_pages == 0);
 
     ret = manager.shutdown();
     CHECK(ret == 0);
@@ -112,6 +134,10 @@ int main(int argc, char **argv)
     ret = backend.close_all();
     CHECK(ret == 0);
     CHECK(backend.page_table_count() == 0);
+    CHECK(backend.counters().pt_pages == 0);
+    CHECK(backend.counters().populated_ptes == 0);
+    CHECK(backend.counters().va_reservations == 0);
+    CHECK(backend.counters().quarantined_pages == 0);
 
     std::printf("PASS: native DMA backing, real DMA addresses, PPGTT translation, submission, and cleanup\n");
     return 0;

@@ -1,0 +1,70 @@
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	-c src/gpuva_model.c -o build/gpuva_model-native-dma-test.o
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	-c src/page_table_memory.c -o build/page_table_memory-native-dma-test.o
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	-c src/haswell_ppgtt_model.c -o build/haswell_ppgtt_model-native-dma-test.o
+g++ -std=c++17 -Wall -Wextra -Werror -pedantic -Iinclude \
+	src/memory_manager.cpp src/native_dma_backend.cpp \
+	build/gpuva_model-native-dma-test.o \
+	build/page_table_memory-native-dma-test.o \
+	build/haswell_ppgtt_model-native-dma-test.o \
+	tests/native-dma-backend-test.cpp \
+	-o build/native-dma-backend-test
+./build/native-dma-backend-test
+SKIP: /dev/idw-edu-dma is not present; run under the QEMU EDU harness
+g++ -std=c++17 -Wall -Wextra -Werror -pedantic -Iinclude \
+	src/memory_manager.cpp src/native_dma_backend.cpp \
+	build/gpuva_model-native-dma-test.o \
+	build/page_table_memory-native-dma-test.o \
+	build/haswell_ppgtt_model-native-dma-test.o \
+	tests/native-dma-fault-test.cpp \
+	-o build/native-dma-fault-test
+./build/native-dma-fault-test
+SKIP: /dev/idw-edu-dma is not present; run under the QEMU EDU harness
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	-c src/gpuva_model.c -o build/gpuva_model-native-dma-static.o
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	-c src/page_table_memory.c -o build/page_table_memory-native-dma-static.o
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	-c src/haswell_ppgtt_model.c -o build/haswell_ppgtt_model-native-dma-static.o
+g++ -std=c++17 -Wall -Wextra -Werror -pedantic -Iinclude -static \
+	src/memory_manager.cpp src/native_dma_backend.cpp \
+	build/gpuva_model-native-dma-static.o \
+	build/page_table_memory-native-dma-static.o \
+	build/haswell_ppgtt_model-native-dma-static.o \
+	tests/native-dma-backend-test.cpp \
+	-o build/native-dma-backend-test-static
+g++ -std=c++17 -Wall -Wextra -Werror -pedantic -Iinclude -static \
+	src/memory_manager.cpp src/native_dma_backend.cpp \
+	build/gpuva_model-native-dma-static.o \
+	build/page_table_memory-native-dma-static.o \
+	build/haswell_ppgtt_model-native-dma-static.o \
+	tests/native-dma-fault-test.cpp \
+	-o build/native-dma-fault-test-static
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	-c src/gpuva_model.c -o build/gpuva_model-memory-test.o
+g++ -std=c++17 -Wall -Wextra -Werror -pedantic -Iinclude \
+	src/memory_manager.cpp build/gpuva_model-memory-test.o \
+	tests/memory-manager-test.cpp \
+	-o build/memory-manager-test
+./build/memory-manager-test
+PASS: integrated memory allocation, VA, binding, submission, and recovery lifecycle
+NOTE: backend is simulated; this is not physical GPU validation.
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	src/gpuva_model.c src/page_table_memory.c src/haswell_ppgtt_model.c \
+	tests/ppgtt-model-test.c \
+	-o build/ppgtt-model-test
+./build/ppgtt-model-test
+PASS: CPU-only GPU-VA allocator and Haswell Gen7.5 PPGTT model tests
+NOTE: synthetic DMA addresses validate software structures only; no GPU mapping or hardware control was tested.
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	src/gpuva_model.c src/page_table_memory.c src/haswell_ppgtt_model.c \
+	src/pt_dma_adapter.c src/native_dma_contract.c \
+	tests/pt-dma-adapter-test.c \
+	-o build/pt-dma-adapter-test
+./build/pt-dma-adapter-test
+PASS: DMA page-table adapter validation, rollback, sync, cleanup, and PPGTT integration
+NOTE: synthetic DMA addresses and simulated provider; no device or GPU operation occurred.
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude -o build/abi-layout-test tests/abi-layout-test.c
+./build/abi-layout-test
