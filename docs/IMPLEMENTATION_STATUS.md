@@ -279,3 +279,23 @@ sync flush, and `GFX_FLSH_CNTL_GEN6`. No hardware state was changed, i915 was
 not unbound, and no physical page walk is claimed. Stage 3 remains not
 implemented; the next physical gate is exclusive ownership, a real GGTT
 allocator, and MMIO register work, not a physical run.
+
+**D2 ownership-aware probe failure:** The QEMU EDU probe-failure path now keeps
+refused providers in a bounded, synchronized kref registry with explicit
+`INITIALIZING`, `ACTIVE`, `CLEANUP_PENDING`, `QUARANTINED`, `RECOVERING`, and
+`RELEASED` states. Cleanup stops new work, releases adapter and provider
+dependencies in order, defers PCI teardown until provider finalization
+succeeds, and retries once per second through a module-referenced workqueue.
+`owner_count` and `owner_state` expose bounded diagnostics. The QEMU
+`--probe-failure` mode forces the real `fail_provider` path with an outstanding
+coherent page, confirms the owner remains reachable while PCI resources stay
+enabled, releases the dependency, performs ordered PCI cleanup, and repeats the
+cycle twice. The owner now pins its `pci_dev` with `pci_dev_get()`/`pci_dev_put()`,
+reserves a registry slot before probe cleanup, and disables the PCI device
+before releasing its regions. Remove-path adapter failure with provider success
+now clears `provider_ready`, so retry cannot call `provider_fini()` on an
+inactive provider. QEMU EDU remains virtual-device evidence; probe-failure
+retention is test-only and is not a production PCI probe pattern. No physical
+Haswell evidence or Stage 3C closure is claimed. See
+`docs/design/STAGE3C_D2_OWNERSHIP_REMEDIATION_REPORT.md` and
+`tests/qemu-dma/d2-ownership-remediation-final-2026-11-21/`.

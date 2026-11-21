@@ -1,0 +1,7 @@
+cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude \
+	src/gpuva_model.c src/page_table_memory.c src/haswell_ppgtt_model.c \
+	tests/ppgtt-model-test.c \
+	-o build/ppgtt-model-test
+./build/ppgtt-model-test
+PASS: CPU-only GPU-VA allocator and Haswell Gen7.5 PPGTT model tests
+NOTE: synthetic DMA addresses validate software structures only; no GPU mapping or hardware control was tested.

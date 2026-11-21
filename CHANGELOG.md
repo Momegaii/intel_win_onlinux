@@ -1,5 +1,14 @@
 # Change log
 
+## 2026-11-21 — Stage 3C D2 ownership lifetime corrections
+- Pinned the retained QEMU EDU owner's `struct pci_dev` with `pci_dev_get()` and released it with `pci_dev_put()` in the kref release callback.
+- Corrected PCI teardown to `pci_iounmap()` then `pci_disable_device()` then `pci_release_regions()`, matching the Linux PCI driver guide.
+- Fixed the remove-path state where adapter finalization failed but provider finalization succeeded: `provider_ready` is now cleared and `provider_cleanup_done` is set, so retry cannot call `idw_dma_provider_fini()` on an inactive provider.
+- Reserved a bounded registry slot before probe cleanup, consumed it on registry insertion, and returned it on owner release or unregistered failure. This closes the gap where a refused finalization could lose its registry slot.
+- Moved synthetic owner lifecycle registration after its adapter, page-table page, and resource exist, eliminating a retry-worker setup race.
+- Marked probe-failure retention as a QEMU EDU test-only quarantine; production probe failure must release all resources.
+- Final verification: kernel `W=1` build, software test group, PPGTT model, Stage 3A, ASan/UBSan, QEMU normal, and QEMU `--probe-failure` all pass. `make test` still stops at the pre-existing no-render-node smoke check. Evidence: `tests/qemu-dma/d2-ownership-remediation-final-2026-11-21/`.
+
 ## 2026-11-20 — Native DMA resource backing through MemoryManager
 - Added `NativeDmaMemoryBackend` (`include/idw/native_dma_backend.hpp`, `src/native_dma_backend.cpp`): allocates device-scoped DMA-mapped resource pages and coherent page-table pages through the QEMU EDU test module, mmaps them, feeds real DMA addresses to the Haswell Gen7.5 PPGTT model, and implements the full `MemoryBackendOps` table.
 - Added test-only UAPI `include/uapi/idw_dma_test.h` and `/dev/idw-edu-dma` in `kernel/idw_edu_dma_test_main.c` for resource alloc/free/segments/sync, page-table alloc/free/sync, and cookie-scoped mmap.

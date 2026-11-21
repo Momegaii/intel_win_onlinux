@@ -417,6 +417,7 @@ int NativeDmaMemoryBackend::bind_cb_impl(uint64_t backing,
     allocation->ptes_cleared = false;
     allocation->ptes_accounted = false;
     allocation->invalidation_done = false;
+    allocation->va_reserved = false;
     allocation->va_released = false;
     allocation->dma_unmapped = false;
     allocation->backing_released = false;
@@ -451,6 +452,11 @@ int NativeDmaMemoryBackend::bind_cb_impl(uint64_t backing,
             allocation->bound = true;
             allocation->va = requested_va;
             *actual_va = requested_va;
+            if (!add_counter(counters_.va_reservations, 1)) {
+                quarantine(*allocation);
+                return -EOVERFLOW;
+            }
+            allocation->va_reserved = true;
             if (!add_counter(counters_.populated_ptes,
                              allocation->page_count)) {
                 quarantine(*allocation);
@@ -468,6 +474,11 @@ int NativeDmaMemoryBackend::bind_cb_impl(uint64_t backing,
     }
     allocation->bound = true;
     allocation->va = requested_va;
+    if (!add_counter(counters_.va_reservations, 1)) {
+        quarantine(*allocation);
+        return -EOVERFLOW;
+    }
+    allocation->va_reserved = true;
     if (!add_counter(counters_.populated_ptes, allocation->page_count)) {
         quarantine(*allocation);
         return -EOVERFLOW;
@@ -494,10 +505,6 @@ int NativeDmaMemoryBackend::bind_cb_impl(uint64_t backing,
     if (!transition(*allocation, ResourceState::ReadyInactive)) {
         quarantine(*allocation);
         return -EIO;
-    }
-    if (!add_counter(counters_.va_reservations, 1)) {
-        quarantine(*allocation);
-        return -EOVERFLOW;
     }
     if (faults_.bind_fail_after_map) {
         allocation->bound = true;
@@ -531,8 +538,11 @@ int NativeDmaMemoryBackend::complete_unbind(Allocation& allocation)
         allocation.invalidation_done = true;
     }
     if (!allocation.va_released) {
-        if (!sub_counter(counters_.va_reservations, 1))
-            return -EIO;
+        if (allocation.va_reserved) {
+            if (!sub_counter(counters_.va_reservations, 1))
+                return -EIO;
+            allocation.va_reserved = false;
+        }
         allocation.va_released = true;
     }
     allocation.bound = false;
@@ -542,6 +552,7 @@ int NativeDmaMemoryBackend::complete_unbind(Allocation& allocation)
     allocation.ptes_cleared = false;
     allocation.ptes_accounted = false;
     allocation.invalidation_done = false;
+    allocation.va_reserved = false;
     allocation.va_released = false;
     allocation.dma_unmapped = false;
     allocation.backing_released = false;

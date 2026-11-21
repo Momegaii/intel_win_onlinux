@@ -57,6 +57,15 @@ To validate only the guest-module/initramfs build prerequisites without
 starting a VM, run `tests/qemu-dma/run.sh --build-only`. This is build evidence
 only and must not be reported as a DMA test pass.
 
+To exercise the real probe-failure ownership path, run
+`tests/qemu-dma/run.sh --probe-failure`. The guest loads the test module with
+`probe_failure_test=1`; the probe allocates a coherent page and forces the
+`fail_provider` path. The provider refuses finalization with `-EBUSY`, the owner
+is retained in the bounded registry as `QUARANTINED`, PCI resources remain
+enabled, and the retry worker releases the injected page, performs ordered PCI
+cleanup, and releases the owner. The guest repeats the cycle twice and requires
+`owner_count == 0` before unload. The normal path remains the default.
+
 On Arch Linux, the QEMU executable is supplied by package `qemu-system-x86`.
 Installation is intentionally a separate, user-approved step:
 
@@ -93,6 +102,15 @@ IDW_QEMU_DMA: remove released all provider resources result=0
 IDW_QEMU_DMA: PASS: probe, page-table DMA, 32 DMA cycles, cleanup and remove completed
 QEMU exit status: 33
 ```
+
+The final D2 ownership-aware probe-failure evidence is in
+`tests/qemu-dma/d2-ownership-remediation-final-2026-11-21/`. Its
+`qemu-dma-probe-failure.log` records two `QUARANTINED` owner retries, PCI
+state `enabled=1 regions=1 master=1 bar=1` while the provider is blocked, and
+subsequent cleanup to all zero before `owner_count` reaches zero. The earlier
+`d2-ownership-remediation-2026-11-21/` directory is retained as historical
+evidence; the final directory adds PCI device pinning, corrected PCI cleanup
+order, registry-slot reservation, and the remove-path provider-state fix.
 
 The full second-pass serial log is
 `tests/qemu-dma/evidence-2026-11-20-stage3c-remediation-pass2.log` (SHA-256

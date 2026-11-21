@@ -27,6 +27,19 @@ using State = idw::NativeDmaMemoryBackend::ResourceState;
         }                                                                    \
     } while (0)
 
+void print_counters(const char *stage, const Backend& backend)
+{
+    const Backend::OwnershipCounters counters = backend.counters();
+    std::printf("COUNTERS %s alloc=%llu mapped=%llu ptes=%llu pt=%llu va=%llu q=%llu\n",
+                stage,
+                (unsigned long long)counters.allocated_pages,
+                (unsigned long long)counters.mapped_pages,
+                (unsigned long long)counters.populated_ptes,
+                (unsigned long long)counters.pt_pages,
+                (unsigned long long)counters.va_reservations,
+                (unsigned long long)counters.quarantined_pages);
+}
+
 bool counters_zero(const Backend& backend)
 {
     const Backend::OwnershipCounters counters = backend.counters();
@@ -317,6 +330,88 @@ int test_bind_failure_after_map(void)
     CHECK(manager.destroy(handle) == 0);
     CHECK(manager.shutdown() == 0);
     CHECK(backend.close_all() == 0);
+    CHECK(counters_zero(backend));
+    return 0;
+}
+
+int test_post_map_sync_failure_ownership(void)
+{
+    Backend backend;
+    idw::MemoryManager manager;
+    CHECK(initialize(backend, manager) == 0);
+
+    idw_handle first = 0;
+    idw_handle second = 0;
+    CHECK(manager.create(4096, first) == 0);
+    idw_gpuva first_va = 0;
+    CHECK(manager.bind(first, 0x20000, first_va) == 0);
+    CHECK(manager.create(4096, second) == 0);
+
+    uint64_t first_backing = 0;
+    uint64_t first_bytes = 0;
+    uint64_t first_cookie = 0;
+    uint64_t second_backing = 0;
+    uint64_t second_bytes = 0;
+    uint64_t second_cookie = 0;
+    CHECK(backend.allocation_at(0, first_backing, first_bytes, first_cookie) == 0);
+    CHECK(backend.allocation_at(1, second_backing, second_bytes,
+                                second_cookie) == 0);
+    CHECK(first_backing != second_backing);
+
+    print_counters("D1_BEFORE", backend);
+    CHECK(backend.counters().allocated_pages == 2);
+    CHECK(backend.counters().mapped_pages == 2);
+    CHECK(backend.counters().populated_ptes == 1);
+    CHECK(backend.counters().pt_pages == 1);
+    CHECK(backend.counters().va_reservations == 1);
+    CHECK(backend.counters().quarantined_pages == 0);
+
+    Backend::FaultPlan plan;
+    plan.sync_page_table_fail = true;
+    backend.set_fault_plan(plan);
+    idw_gpuva second_va = 0;
+    CHECK(manager.bind(second, 0x21000, second_va) == -EUCLEAN);
+    print_counters("D1_FAILURE", backend);
+
+    State state;
+    CHECK(backend.allocation_state(second_backing, state) == 0);
+    CHECK(state == State::Quarantined);
+    CHECK(backend.counters().allocated_pages == 2);
+    CHECK(backend.counters().mapped_pages == 2);
+    CHECK(backend.counters().populated_ptes == 2);
+    CHECK(backend.counters().pt_pages == 1);
+    CHECK(backend.counters().va_reservations == 2);
+    CHECK(backend.counters().quarantined_pages == 1);
+    CHECK(manager.destroy(second) == -EBUSY);
+
+    backend.set_fault_plan(Backend::FaultPlan{});
+    CHECK(manager.recover_binding(second) == 0);
+    print_counters("D1_AFTER_RECOVER", backend);
+    CHECK(backend.allocation_state(second_backing, state) == 0);
+    CHECK(state == State::BackingAllocated);
+    CHECK(backend.counters().allocated_pages == 2);
+    CHECK(backend.counters().mapped_pages == 2);
+    CHECK(backend.counters().populated_ptes == 1);
+    CHECK(backend.counters().pt_pages == 1);
+    CHECK(backend.counters().va_reservations == 1);
+    CHECK(backend.counters().quarantined_pages == 0);
+
+    CHECK(manager.unbind(first) == 0);
+    CHECK(manager.destroy(first) == 0);
+    CHECK(backend.counters().allocated_pages == 1);
+    CHECK(backend.counters().mapped_pages == 1);
+    CHECK(backend.counters().populated_ptes == 0);
+    CHECK(backend.counters().pt_pages == 1);
+    CHECK(backend.counters().va_reservations == 0);
+    CHECK(backend.counters().quarantined_pages == 0);
+
+    idw_gpuva rebound_va = 0;
+    CHECK(manager.bind(second, 0x21000, rebound_va) == 0);
+    CHECK(manager.unbind(second) == 0);
+    CHECK(manager.destroy(second) == 0);
+    CHECK(manager.shutdown() == 0);
+    CHECK(backend.close_all() == 0);
+    print_counters("D1_RECOVERY", backend);
     CHECK(counters_zero(backend));
     return 0;
 }
@@ -637,6 +732,7 @@ int main(int argc, char **argv)
     CHECK(test_destroy_retry() == 0);
     CHECK(test_unbind_retry() == 0);
     CHECK(test_bind_failure_after_map() == 0);
+    CHECK(test_post_map_sync_failure_ownership() == 0);
     CHECK(test_unbind_sync_failure_retry() == 0);
     CHECK(test_destroy_after_unmap_retry() == 0);
     CHECK(test_page_table_release_retry() == 0);

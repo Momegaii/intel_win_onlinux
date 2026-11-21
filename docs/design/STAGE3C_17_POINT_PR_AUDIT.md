@@ -208,7 +208,12 @@ The QEMU EDU happy path is real virtual-device DMA evidence and it passed. It do
 
 ### Check 16 — Failure-path evidence
 
-- **Status:** **FAIL**
+- **Status:** **FAIL** (full matrix still missing; D2 adds probe-failure coverage only)
+- **D2 follow-up (2026-11-21):** `tests/qemu-dma/run.sh --probe-failure` now
+  injects the real `fail_provider` path, exercises registry reachability,
+  deferred PCI cleanup, and two recovery rounds. The remaining allocation,
+  mapping, sync, mmap, quiescence, and full removal failure matrix is still
+  required; this Check remains FAIL.
 - **Source File & Function:** `tests/native-dma-backend-test.cpp:20-118` (native test); `tests/qemu-dma/run.sh:112-119` (QEMU success grep); `tests/qemu-dma/guest_init.c:127-135` (guest sequence); `tests/ppgtt-model-test.c:35-60,443-545,790-805` (model injection); `tests/pt-dma-adapter-test.c:34-42,390-418,536-543` (adapter injection); `kernel/idw_edu_dma_test_main.c:221-283` (kernel malformed descriptors).
 - **Exact Relevant Lines:** The native test covers only the happy lifecycle plus duplicate bind and destroy-while-bound (`tests/native-dma-backend-test.cpp:61-63,98-104`). The QEMU runner only checks four success strings and exit 33 (`tests/qemu-dma/run.sh:112-119`); it has no fault-injection mode. The kernel self-test rejects malformed PT descriptors, wrong scope, wrong length, wrong cookie, and unsupported mapping (`kernel/idw_edu_dma_test_main.c:221-283`), and rejects invalid resource length/scope/cookie (`:549-574`). The model and adapter tests have simulated allocation, sync, write, read, and flush failures.
 - **Test & Output:** `make ppgtt-model-test` and `make pt-dma-adapter-test` pass with simulated failures. `make native-dma-backend-test` locally skips. QEMU happy path passes. There is no QEMU fault-injection target or mode; `grep` of `tests/qemu-dma/run.sh`/`guest_init.c` found no fault-injection harness.
@@ -221,7 +226,8 @@ The QEMU EDU happy path is real virtual-device DMA evidence and it passed. It do
 - **Source File & Function:** This report and `tests/qemu-dma/STAGE3C_AUDIT_EVIDENCE.md`.
 - **Exact Relevant Lines:** Section 6 of this report and the evidence ledger maintain the five buckets:
   1. QEMU happy-path evidence: present, QEMU 10.0.13 TCG, exit 33.
-  2. QEMU fault-injection evidence: **empty**; no fault mode exists.
+  2. QEMU fault-injection evidence: **partial**; the D2 probe-failure mode
+     exists, but the full failure matrix is still empty.
   3. CPU-model/software evidence: present, `ppgtt-model-test`, `pt-dma-adapter-test`, `memory-manager-test`, host backend.
   4. i915-assisted physical execution evidence: **empty**; i915 tests are simulated and no GPU is exposed.
   5. Independent physical GPU validation evidence: **empty**; no physical Haswell test.
