@@ -1034,3 +1034,10 @@ evidence of absence and does not close Stage 3C.
 
 Evidence: `tests/physical/evidence-2026-11-21/`.
 Runbook: `docs/design/STAGE3C_PHYSICAL_EVIDENCE_RUNBOOK.md`.
+
+### Read-only evidence API
+
+Added a fixed-command HTTP wrapper for the physical Haswell collector. It
+supports only `POST /collect`, returns the evidence logs as JSON, and does not
+expose a shell or accept arbitrary commands. Access is intended through
+Tailscale or a temporary tunnel; the server binds to localhost by default.

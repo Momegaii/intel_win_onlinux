@@ -1,5 +1,10 @@
 # Change log
 
+## 2026-11-21 — Read-only evidence API
+- Added `tools/idw-evidence-api.py`, a fixed-command HTTP wrapper around the physical Haswell evidence collector.
+- The API exposes only `POST /collect` and returns collector logs; it does not expose a shell, arbitrary commands, or GPU ownership operations.
+- Added `docs/design/STAGE3C_EVIDENCE_API.md` with localhost, Tailscale, and Cloudflare Tunnel usage.
+
 ## 2026-11-21 — Physical Haswell evidence collector
 - Added `tests/physical/haswell-evidence.sh` and `make physical-evidence` for read-only Stage 3C Check 15 collection: target PCI address, `8086:0412`, `i915` binding, and render node.
 - Added `docs/design/STAGE3C_PHYSICAL_EVIDENCE_RUNBOOK.md` and recorded the current VM result at `tests/physical/evidence-2026-11-21/`.
